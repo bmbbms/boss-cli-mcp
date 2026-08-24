@@ -1,13 +1,13 @@
-# boss-cli — Boss直聘自动化 CLI | 批量发消息 · 自动打招呼 · AI Agent 招聘工具
+# boss-cli — Boss直聘自动化 CLI + MCP | 批量发消息 · 自动打招呼 · AI Agent 招聘工具
 
 [![npm version](https://img.shields.io/npm/v/@joohw/boss-cli)](https://www.npmjs.com/package/@joohw/boss-cli)
 [![npm downloads](https://img.shields.io/npm/dm/@joohw/boss-cli)](https://www.npmjs.com/package/@joohw/boss-cli)
 [![license](https://img.shields.io/github/license/joohw/boss-cli)](./LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/joohw/boss-cli)](https://github.com/joohw/boss-cli)
 
-官网主页：[boss-cli.com](https://boss-cli.com)
+官网主页：[boss-cli.com](https://boss-cli.com) · 上游项目：[joohw/boss-cli](https://github.com/joohw/boss-cli)
 
-**boss-cli**（`@joohw/boss-cli`）是开源的 **Boss直聘自动化命令行工具**。基于 Puppeteer / CDP 协议驱动本机 Chrome，无需 Selenium，把 Boss直聘 B 端的核心 HR 操作搬进终端：**候选人列表**、**批量发消息**、**自动打招呼**、**在线简历预览**、**深度搜索**、**职位管理**。
+**boss-cli**（`@joohw/boss-cli`）是开源的 **Boss直聘自动化命令行工具**，并提供可供 Claude、Cursor、Zcode 等客户端使用的 MCP 服务。基于 Puppeteer / CDP 协议驱动本机 Chrome，无需 Selenium，把 Boss直聘 B 端的核心 HR 操作搬进终端和 AI Agent：**候选人列表**、**批量发消息**、**自动打招呼**、**在线简历预览**、**深度搜索**、**职位管理**。
 
 适合 HR 日常提效，也适合 Claude / GPT / Gemini 等 **AI Agent** 通过子进程调用，搭建全自动化招聘流水线。
 
@@ -17,7 +17,7 @@ boss login
 boss help
 ```
 
-> 纯 CLI，不内置对话式 Agent。每条命令输出结构化纯文本，Agent 可直接解析并编排多步流程。
+> CLI 和 MCP 都是本地运行，不经过第三方业务服务器。MCP 使用 stdio 传输，直接复用本机 Chrome 登录态。
 
 ---
 
@@ -26,6 +26,7 @@ boss help
 | 场景 | 命令 |
 | --- | --- |
 | Boss直聘批量发消息 | `boss send --text "..."` 配合脚本循环 |
+| MCP 批量回复 | `boss_batch_send_messages` + `boss_batch_send_status` |
 | Boss直聘自动打招呼 | `boss greet <姓名> [--job <岗位>]` |
 | Boss直聘候选人筛选 | `boss list` / `boss list --unread` |
 | Boss直聘脚本自动化 | 本机 Chrome + CDP，Cookie 本地存储 |
@@ -42,6 +43,19 @@ boss help
 npm install -g @joohw/boss-cli@latest
 boss help
 ```
+
+### 从源码运行 MCP（Windows）
+
+本仓库当前示例路径为 `D:\\boss-cli`：
+
+```powershell
+cd D:\\boss-cli
+npm install
+npm run build
+& "D:\\nodejs\\node.exe" "D:\\boss-cli\\dist\\mcp\\index.js"
+```
+
+MCP 进程启动后没有普通终端输出是正常的，它通过 stdio 与客户端通信。
 
 如果你觉得 boss-cli 好用，欢迎给本仓库一个 Star；使用中遇到问题请提交 Issue，新功能或改进也欢迎提交 PR。
 
@@ -68,6 +82,7 @@ boss help
 | `boss chat <姓名> [--strict]` | 打开指定候选人会话 |
 | `boss chat [姓名] --index <序号> [--unread] [--strict]` | 按 `boss list` 输出序号打开会话；同名候选人建议用序号 |
 | `boss send [--text <内容>]` | 向当前会话发送消息 |
+| `boss-mcp` / `dist/mcp/index.js` | 启动 stdio MCP 服务 |
 | `boss action <操作>` | 索要简历 / 不合适 / 备注 / 交换微信等 |
 | `boss recommend [岗位关键字]` | 读取推荐候选人列表 |
 | `boss search [关键词]` | 常规搜索牛人列表 |
@@ -130,6 +145,74 @@ boss-cli 每条命令输出纯文本，适合 LLM 通过子进程编排：
 ```
 
 详见 [AGENTS.md](./AGENTS.md)。
+
+### MCP 集成
+
+仓库内置 stdio MCP 服务，将候选人列表、聊天、消息、批量回复、搜索、推荐等能力暴露为独立 MCP 工具。源码运行：
+
+```bash
+npm install
+npm run build
+node dist/mcp/index.js
+```
+
+客户端配置与完整工具列表见 [docs/mcp.md](./docs/mcp.md)。
+
+#### Zcode / Claude Desktop 配置
+
+Windows 配置示例（路径中的空格必须保留在同一个 `args` 元素中）：
+
+```json
+{
+  "boss-recruiter": {
+    "type": "stdio",
+    "command": "D:\\nodejs\\node.exe",
+    "args": [
+      "D:\\boss-cli\\dist\\mcp\\index.js"
+    ]
+  }
+}
+```
+
+首次使用时调用 `boss_login`，在打开的 Chrome 中完成登录。之后 MCP 工具会复用
+`~/.boss-cli/` 下的本地浏览器会话。
+
+#### MCP 工具
+
+服务当前提供：
+
+`boss_login`、`boss_list_candidates`、`boss_open_chat`、`boss_open_chat_by_index`、
+`boss_chat_action`、`boss_send_message`、`boss_batch_send_messages`、
+`boss_batch_send_status`、`boss_list_positions`、`boss_deep_search`、
+`boss_normal_search`、`boss_recommend`、`boss_preview_candidate`、
+`boss_greet_candidate`、`boss_set_baidu_credentials`。
+
+#### 批量回复消息
+
+批量回复默认采用异步任务，避免首次启动 Chrome 或页面加载较慢时触发客户端超时：
+
+1. 调用 `boss_list_candidates` 获取候选人姓名并人工确认。
+2. 调用 `boss_batch_send_messages`，传入消息列表和 `confirm: true`。
+3. 工具立即返回 `taskId`。
+4. 使用 `boss_batch_send_status` 查询进度和逐人结果。
+
+示例参数：
+
+```json
+{
+  "messages": [
+    {
+      "candidateName": "张三",
+      "text": "您好，感谢您的关注，请问方便补充一下简历吗？",
+      "exact": true
+    }
+  ],
+  "confirm": true
+}
+```
+
+工具会逐个打开会话、精确匹配姓名并发送文本，返回 `sent` / `failed` 状态；不会自动执行
+“求简历”。批量发送会真实影响 Boss 账号，请控制发送数量和频率，避免触发平台风控。
 
 ---
 
