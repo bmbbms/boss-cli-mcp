@@ -32,7 +32,10 @@ const sessionGreetProducedGeekIds = new Set<string>();
  * 在线简历预览：点击卡片主体 `.card-inner`，而非「在线简历」链接或「打招呼」。
  */
 const RECOMMEND_CARD_ROOT_SELECTOR =
-  '.candidate-card-wrap, .card-list .card-item, .geek-list .geek-card';
+  '.card-list > .card-item, .geek-list > .geek-card';
+
+const RECOMMEND_SCROLL_MAX_ROUNDS = 12;
+const RECOMMEND_SCROLL_WAIT_MS = 1_200;
 
 export function isBossChatRecommendUrl(url: string): boolean {
   try {
@@ -84,6 +87,44 @@ async function ensureRecommendFrameReady(frame: Frame): Promise<void> {
     })()`,
     { timeout: 18_000 },
   );
+}
+
+/**
+ * 推荐页是 iframe 内的文档滚动，不是 `.card-list` 自身滚动。
+ * 到底后页面才会触发下一批候选人加载；逐轮滚到底并等待 DOM 增长，直到页面明确显示“没有更多了”。
+ */
+async function loadAllRecommendCards(frame: Frame): Promise<void> {
+  let previousCount = 0;
+  let stableRounds = 0;
+
+  for (let round = 0; round < RECOMMEND_SCROLL_MAX_ROUNDS; round += 1) {
+    const before = (await frame.evaluate(`(() => {
+      const count = document.querySelectorAll(${JSON.stringify(RECOMMEND_CARD_ROOT_SELECTOR)}).length;
+      const text = document.body?.innerText ?? "";
+      const end = /没有更多/.test(text);
+      window.scrollTo({ top: Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight ?? 0), behavior: "smooth" });
+      return { count, end };
+    })()`)) as { count: number; end: boolean };
+
+    if (before.end) return;
+    await sleepRandom(RECOMMEND_SCROLL_WAIT_MS, RECOMMEND_SCROLL_WAIT_MS + 300);
+
+    const after = (await frame.evaluate(`(() => ({
+      count: document.querySelectorAll(${JSON.stringify(RECOMMEND_CARD_ROOT_SELECTOR)}).length,
+      end: /没有更多/.test(document.body?.innerText ?? ""),
+    }))()`)) as { count: number; end: boolean };
+
+    if (after.end) return;
+    if (after.count > previousCount || after.count > before.count) {
+      stableRounds = 0;
+    } else {
+      stableRounds += 1;
+    }
+    previousCount = after.count;
+
+    // 两轮到底都没有新增内容，页面已经没有可继续加载的候选人。
+    if (stableRounds >= 2) return;
+  }
 }
 
 async function readCurrentRecommendJobLabel(frame: Frame): Promise<string> {
@@ -498,6 +539,7 @@ export async function runRecommend(jobKeyword?: string): Promise<string> {
     return await withBossSessionPage(async (page) => {
       const frame = await ensureInRecommendPage(page);
       const selectedJob = await selectRecommendJob(frame, (jobKeyword ?? '').trim());
+      await loadAllRecommendCards(frame);
       const candidates = await readRecommendList(frame);
       const title = selectedJob ? `当前岗位：${selectedJob}` : '当前岗位：默认';
       return [title, '', renderRecommendList(candidates)].join('\n');

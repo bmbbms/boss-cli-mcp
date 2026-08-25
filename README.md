@@ -33,6 +33,76 @@
 
 ## 安装
 
+### 通过 npm 安装（推荐）
+
+发布后可以直接安装本包：
+
+```powershell
+npm install -g boss-cli-mcp
+```
+
+安装完成后有两个命令：
+
+```powershell
+boss --help       # CLI
+boss-cli-mcp      # MCP 服务（stdio）
+```
+
+也可以不全局安装，直接使用：
+
+```powershell
+npx boss-cli-mcp
+```
+
+### 发布到阿里云 npm 仓库
+
+阿里云仓库地址由你们的企业/团队空间决定，不能使用固定公共地址。请在阿里云
+Packages 页面复制完整的 npm registry URL（通常以 `/` 结尾），然后在 PowerShell
+执行：
+
+```powershell
+$registry = "https://packages.aliyun.com/621cab5b756fe0dd8b6d7c29/npm/repo-apxsi/"
+npm login --registry=$registry
+npm run build
+npm publish --registry=$registry
+```
+
+验证发布结果：
+
+```powershell
+npm view boss-cli-mcp version --registry=$registry
+```
+
+如果提示版本已存在，先递增版本号再发布：
+
+```powershell
+npm version patch --no-git-tag-version
+npm publish --registry=$registry
+```
+
+完整的阿里云仓库配置说明见 [`docs/npm-aliyun.md`](docs/npm-aliyun.md)。不要把
+Token 写进仓库或提交 `.npmrc`。
+
+在 Zcode、Claude Desktop、Cursor 等 MCP 客户端中，使用 npm 安装后的命令：
+
+```json
+{
+  "boss-recruiter": {
+    "type": "stdio",
+    "command": "boss-cli-mcp",
+    "args": []
+  }
+}
+```
+
+如果客户端找不到全局命令，请改用 Node 和全局安装目录中的入口：
+
+```powershell
+npm root -g
+```
+
+然后把 `args` 设置为该目录下 `boss-cli-mcp/dist/mcp/index.js` 的绝对路径。
+
 ### 从本仓库运行 MCP
 
 ```powershell
@@ -56,12 +126,12 @@ D:\boss-cli\dist\mcp\index.js
 
 MCP 使用 stdio 通信，启动后终端没有普通输出属于正常现象。按 `Ctrl+C` 可以停止测试进程。
 
-### 安装上游 CLI
+### 只安装 CLI
 
-如果只需要 CLI，可以直接安装上游 npm 包：
+本包同时提供 `boss` CLI 命令：
 
 ```powershell
-npm install -g @joohw/boss-cli@latest
+npm install -g boss-cli-mcp
 boss help
 ```
 
@@ -140,6 +210,8 @@ boss_login
 | `boss_preview_candidate` | 预览在线简历 |
 | `boss_greet_candidate` | 异步向推荐或搜索结果中的候选人打招呼，返回 `taskId` |
 | `boss_async_task_status` | 查询推荐、打招呼和批量发送任务 |
+| `boss_cancel_task` | 请求取消正在运行的异步任务 |
+| `boss_mcp_health` | 检查 MCP、Chrome CDP 和任务状态 |
 | `boss_set_baidu_credentials` | 设置百度 OCR 凭据 |
 
 ## 批量回复消息
@@ -168,7 +240,8 @@ boss_login
       "exact": true
     }
   ],
-  "confirm": true
+  "confirm": true,
+  "confirmationText": "确认给张三、李四发送消息"
 }
 ```
 
@@ -178,7 +251,10 @@ boss_login
 {
   "taskId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
   "status": "running",
-  "total": 2
+  "total": 2,
+  "processed": 0,
+  "sent": 0,
+  "failed": 0
 }
 ```
 
@@ -220,9 +296,11 @@ boss_login
 - `text`：要发送的消息正文。
 - `exact`：是否精确匹配姓名，建议保持 `true`。
 - `confirm`：必须显式设置为 `true`，否则不会发送。
+- `confirmationText`：必须等于候选人摘要，例如 `确认给张三、李四发送消息`。
+- `dryRun`：设为 `true` 只校验并预览，不会打开聊天或发送消息。
 - `waitForCompletion`：默认 `false`。不建议改成 `true`，否则首次加载页面时可能触发 MCP 客户端超时。
 
-批量工具会串行处理候选人，并记录每人的 `sent` 或 `failed` 状态。单个候选人失败不会阻止后续候选人继续执行。
+批量工具会串行处理候选人，并实时记录 `processed`、`sent`、`failed`、`currentCandidate` 和每人的结果。单次最多 20 人。单个候选人失败不会阻止后续候选人继续执行；重复候选人、空消息和超过 2,000 字的消息会在启动前拒绝。同一 MCP 进程同时只运行一个浏览器写操作任务。
 
 ### 推荐和打招呼任务
 
@@ -240,7 +318,7 @@ boss_login
 ```text
 调用 boss_list_candidates 获取未读候选人，将列表展示给我并等待确认。
 我确认后，使用 boss_batch_send_messages 逐个发送指定消息。
-必须精确匹配姓名并设置 confirm=true。
+必须精确匹配姓名，设置 confirm=true，并提供 confirmationText。
 取得 taskId 后，定期调用 boss_batch_send_status，最后汇总成功和失败结果。
 ```
 

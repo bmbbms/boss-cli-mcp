@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
-import { existsSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { config as loadEnv } from 'dotenv';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -16,6 +17,7 @@ import {
   implListPositionsWithOptions,
   implListUnreadCandidates,
   implNormalSearch,
+  implOpenAndSendMessage,
   implOpenChat,
   implOpenChatByIndex,
   implPreview,
@@ -25,6 +27,11 @@ import {
   implSetBaiduCredentials,
   type ChatPageAction,
 } from '../toolset/index.js';
+import { getBrowserRef, getPageRef } from '../browser/browser_session.js';
+
+const require = createRequire(import.meta.url);
+const packageJson = require('../../package.json') as { version?: string };
+const MCP_VERSION = packageJson.version ?? '0.1.0';
 
 // Keep MCP and the CLI on the same local configuration and browser session.
 const userEnvPath = join(APP_HOME, '.env');
@@ -33,8 +40,49 @@ if (existsSync(userEnvPath)) {
 }
 loadEnv({ quiet: true });
 
+// Read runtime settings only after both supported .env locations are loaded.
+// Otherwise values in ~/.boss-cli/.env are silently ignored at module startup.
+const TASK_TIMEOUT_MS = Number.parseInt(process.env.BOSS_MCP_TASK_TIMEOUT_MS ?? '', 10) || 30 * 60_000;
+const TASK_TTL_MS = Number.parseInt(process.env.BOSS_MCP_TASK_TTL_MS ?? '', 10) || 60 * 60_000;
+const MAX_MESSAGE_LENGTH = 2_000;
+const MAX_BATCH_SIZE = 20;
+const MCP_LOG_DIR = join(APP_HOME, 'logs');
+const MCP_LOG_FILE = join(MCP_LOG_DIR, 'mcp.log');
+
+mkdirSync(MCP_LOG_DIR, { recursive: true });
+
+function mcpLog(event: string, fields: Record<string, unknown> = {}): void {
+  const line = `${JSON.stringify({
+    ts: new Date().toISOString(),
+    event,
+    pid: process.pid,
+    ...fields,
+  })}\n`;
+  appendFileSync(MCP_LOG_FILE, line, { encoding: 'utf8' });
+  process.stderr.write(line);
+}
+
+mcpLog('startup', {
+  version: MCP_VERSION,
+  node: process.version,
+  cwd: process.cwd(),
+  entrypoint: process.argv[1] ?? null,
+});
+
 function textResult(text: string) {
-  return { content: [{ type: 'text' as const, text: text.trimEnd() }] };
+  const trimmed = text.trimEnd();
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return {
+        content: [{ type: 'text' as const, text: trimmed }],
+        structuredContent: parsed as Record<string, unknown>,
+      };
+    }
+  } catch {
+    // Plain-text tool responses remain text-only for backwards compatibility.
+  }
+  return { content: [{ type: 'text' as const, text: trimmed }] };
 }
 
 type BatchMessage = {
@@ -45,10 +93,15 @@ type BatchMessage = {
 
 type BatchTask = {
   taskId: string;
-  status: 'running' | 'completed' | 'failed';
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
   total: number;
   sent: number;
   failed: number;
+  processed: number;
+  currentCandidate?: string;
+  startedAt: string;
+  completedAt?: string;
+  cancelRequested?: boolean;
   results: Array<{
     candidateName: string;
     status: 'sent' | 'failed';
@@ -63,28 +116,106 @@ const batchTasks = new Map<string, BatchTask>();
 type AsyncBrowserTask = {
   taskId: string;
   operation: 'recommend' | 'greet';
-  status: 'running' | 'completed' | 'failed';
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  startedAt: string;
+  completedAt?: string;
+  cancelRequested?: boolean;
   result?: string;
   error?: string;
 };
 
 const asyncBrowserTasks = new Map<string, AsyncBrowserTask>();
+const taskControllers = new Map<string, AbortController>();
+let activeBatchTaskId: string | null = null;
+let activeBrowserTaskId: string | null = null;
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function cleanupExpiredTasks(): void {
+  const cutoff = Date.now() - TASK_TTL_MS;
+  for (const [taskId, task] of batchTasks) {
+    const completedAt = task.completedAt ? Date.parse(task.completedAt) : 0;
+    if (completedAt > 0 && completedAt < cutoff) batchTasks.delete(taskId);
+  }
+  for (const [taskId, task] of asyncBrowserTasks) {
+    const completedAt = task.completedAt ? Date.parse(task.completedAt) : 0;
+    if (completedAt > 0 && completedAt < cutoff) asyncBrowserTasks.delete(taskId);
+  }
+}
+
+const taskCleanupTimer = setInterval(cleanupExpiredTasks, Math.min(TASK_TTL_MS, 5 * 60_000));
+taskCleanupTimer.unref();
+
+function buildConfirmationText(messages: BatchMessage[]): string {
+  return `确认给${messages.map((item) => item.candidateName).join('、')}发送消息`;
+}
+
+function normalizeBatchMessages(messages: BatchMessage[]): BatchMessage[] {
+  if (messages.length > MAX_BATCH_SIZE) {
+    throw new Error(`单次最多发送 ${MAX_BATCH_SIZE} 人。`);
+  }
+  const normalized = messages.map((item) => ({
+    candidateName: item.candidateName.trim(),
+    text: item.text.trim(),
+    exact: item.exact !== false,
+  }));
+  const seen = new Set<string>();
+  for (const item of normalized) {
+    if (!item.candidateName) throw new Error('候选人姓名不能为空。');
+    if (!item.text) throw new Error(`候选人「${item.candidateName}」的消息不能为空。`);
+    if (item.text.length > MAX_MESSAGE_LENGTH) {
+      throw new Error(`候选人「${item.candidateName}」的消息超过 ${MAX_MESSAGE_LENGTH} 个字符。`);
+    }
+    const key = item.candidateName.toLocaleLowerCase();
+    if (seen.has(key)) throw new Error(`批量列表中存在重复候选人：${item.candidateName}`);
+    seen.add(key);
+  }
+  return normalized;
+}
 
 function startAsyncBrowserTask(
   operation: AsyncBrowserTask['operation'],
   run: () => Promise<string>,
 ): string {
+  if (activeBrowserTaskId) {
+    throw new Error(`已有浏览器异步任务正在运行：${activeBrowserTaskId}`);
+  }
   const taskId = randomUUID();
-  const task: AsyncBrowserTask = { taskId, operation, status: 'running' };
+  const controller = new AbortController();
+  const task: AsyncBrowserTask = { taskId, operation, status: 'running', startedAt: nowIso() };
   asyncBrowserTasks.set(taskId, task);
+  taskControllers.set(taskId, controller);
+  activeBrowserTaskId = taskId;
+  mcpLog('task_started', { taskId, operation });
+  const timeout = setTimeout(() => {
+    task.cancelRequested = true;
+    controller.abort(new Error(`异步任务超过 ${TASK_TIMEOUT_MS / 1000}s，已请求停止。`));
+  }, TASK_TIMEOUT_MS);
   void run()
     .then((result) => {
-      task.status = 'completed';
-      task.result = result;
+      clearTimeout(timeout);
+      if (task.cancelRequested) {
+        task.status = 'cancelled';
+        task.error = `异步任务超过 ${TASK_TIMEOUT_MS / 1000}s。`;
+      } else {
+        task.status = 'completed';
+        task.result = result;
+      }
+      task.completedAt = nowIso();
+      mcpLog('task_finished', { taskId, operation, status: task.status });
     })
     .catch((error) => {
-      task.status = 'failed';
+      clearTimeout(timeout);
+      task.status = task.cancelRequested ? 'cancelled' : 'failed';
       task.error = error instanceof Error ? error.message : String(error);
+      task.completedAt = nowIso();
+      mcpLog('task_finished', { taskId, operation, status: task.status, error: task.error });
+    })
+    .finally(() => {
+      taskControllers.delete(taskId);
+      if (activeBrowserTaskId === taskId) activeBrowserTaskId = null;
     });
   return JSON.stringify(
     {
@@ -101,6 +232,8 @@ function startAsyncBrowserTask(
 async function runBatchSendMessages(
   messages: BatchMessage[],
   confirm: boolean,
+  task?: BatchTask,
+  signal?: AbortSignal,
 ): Promise<string> {
   if (!confirm) {
     throw new Error('批量发送是实际账号操作；请将 confirm 设置为 true 后再执行。');
@@ -114,9 +247,17 @@ async function runBatchSendMessages(
   }> = [];
 
   for (const item of messages) {
+    if (signal?.aborted) {
+      throw signal.reason instanceof Error ? signal.reason : new Error('批量任务已取消。');
+    }
+    if (task) task.currentCandidate = item.candidateName;
     try {
-      await implOpenChat(item.candidateName, item.exact);
-      const result = await implSendMessage({ text: item.text, requestResume: false });
+      const result = await implOpenAndSendMessage({
+        candidateName: item.candidateName,
+        text: item.text,
+        exact: item.exact,
+        signal,
+      });
       results.push({ candidateName: item.candidateName, status: 'sent', message: result });
     } catch (error) {
       results.push({
@@ -124,6 +265,12 @@ async function runBatchSendMessages(
         status: 'failed',
         error: error instanceof Error ? error.message : String(error),
       });
+    }
+    if (task) {
+      task.processed = results.length;
+      task.sent = results.filter((item) => item.status === 'sent').length;
+      task.failed = results.filter((item) => item.status === 'failed').length;
+      task.results = [...results];
     }
   }
 
@@ -139,33 +286,101 @@ async function runBatchSendMessages(
   );
 }
 
-function startBatchSendMessages(messages: BatchMessage[], confirm: boolean): string {
-  if (!confirm) {
-    throw new Error('批量发送是实际账号操作；请将 confirm 设置为 true 后再执行。');
+async function runBatchSendMessagesWithLifecycle(
+  messages: BatchMessage[],
+  confirm: boolean,
+): Promise<string> {
+  if (activeBrowserTaskId) {
+    throw new Error(`已有浏览器任务正在运行：${activeBrowserTaskId}`);
   }
-
   const taskId = randomUUID();
+  const controller = new AbortController();
   const task: BatchTask = {
     taskId,
     status: 'running',
     total: messages.length,
     sent: 0,
     failed: 0,
+    processed: 0,
+    startedAt: nowIso(),
+    results: [],
+  };
+  activeBrowserTaskId = taskId;
+  mcpLog('task_started', { taskId, operation: 'batch_send', total: messages.length, waitForCompletion: true });
+  const timeout = setTimeout(() => controller.abort(new Error(`批量任务超过 ${TASK_TIMEOUT_MS / 1000}s。`)), TASK_TIMEOUT_MS);
+  let taskStatus: 'completed' | 'failed' = 'completed';
+  try {
+    return await runBatchSendMessages(messages, confirm, task, controller.signal);
+  } catch (error) {
+    taskStatus = 'failed';
+    mcpLog('task_failed', {
+      taskId,
+      operation: 'batch_send',
+      waitForCompletion: true,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    activeBrowserTaskId = null;
+    mcpLog('task_finished', { taskId, operation: 'batch_send', status: taskStatus, waitForCompletion: true });
+  }
+}
+
+function startBatchSendMessages(messages: BatchMessage[], confirm: boolean): string {
+  if (!confirm) {
+    throw new Error('批量发送是实际账号操作；请将 confirm 设置为 true 后再执行。');
+  }
+
+  if (activeBrowserTaskId) {
+    throw new Error(`已有浏览器任务正在运行：${activeBrowserTaskId}`);
+  }
+  const taskId = randomUUID();
+  const controller = new AbortController();
+  const task: BatchTask = {
+    taskId,
+    status: 'running',
+    total: messages.length,
+    sent: 0,
+    failed: 0,
+    processed: 0,
+    startedAt: nowIso(),
     results: [],
   };
   batchTasks.set(taskId, task);
+  taskControllers.set(taskId, controller);
+  activeBatchTaskId = taskId;
+  activeBrowserTaskId = taskId;
+  mcpLog('task_started', { taskId, operation: 'batch_send', total: messages.length, waitForCompletion: false });
+  const timeout = setTimeout(() => {
+    task.cancelRequested = true;
+    controller.abort(new Error(`批量任务超过 ${TASK_TIMEOUT_MS / 1000}s，已请求停止。`));
+  }, TASK_TIMEOUT_MS);
 
-  void runBatchSendMessages(messages, true)
+  void runBatchSendMessages(messages, true, task, controller.signal)
     .then((summary) => {
       const parsed = JSON.parse(summary) as Pick<BatchTask, 'sent' | 'failed' | 'results'>;
-      task.status = 'completed';
+      task.status = task.cancelRequested ? 'cancelled' : 'completed';
       task.sent = parsed.sent;
       task.failed = parsed.failed;
       task.results = parsed.results;
+      task.currentCandidate = undefined;
+      task.processed = messages.length;
+      task.completedAt = nowIso();
+      if (task.cancelRequested) task.error = '批量任务已取消或超时。';
+      mcpLog('task_finished', { taskId, operation: 'batch_send', status: task.status, sent: task.sent, failed: task.failed });
     })
     .catch((error) => {
-      task.status = 'failed';
+    task.status = task.cancelRequested ? 'cancelled' : 'failed';
       task.error = error instanceof Error ? error.message : String(error);
+      task.completedAt = nowIso();
+      mcpLog('task_finished', { taskId, operation: 'batch_send', status: task.status, error: task.error });
+    })
+    .finally(() => {
+      clearTimeout(timeout);
+      taskControllers.delete(taskId);
+      if (activeBatchTaskId === taskId) activeBatchTaskId = null;
+      if (activeBrowserTaskId === taskId) activeBrowserTaskId = null;
     });
 
   return JSON.stringify(
@@ -182,7 +397,7 @@ function startBatchSendMessages(messages: BatchMessage[], confirm: boolean): str
 
 const server = new McpServer({
   name: 'boss-cli',
-  version: '0.6.6',
+  version: MCP_VERSION,
 });
 
 server.registerTool(
@@ -265,7 +480,7 @@ server.registerTool(
   'boss_batch_send_messages',
   {
     description:
-      '按候选人姓名逐个打开聊天并发送消息。工具会串行执行，返回每位候选人的发送结果；必须显式确认真实发送。',
+      '按候选人姓名逐个打开聊天并发送消息。工具会串行执行，最多 20 人；必须显式确认真实发送。',
     inputSchema: {
       messages: z
         .array(
@@ -276,8 +491,17 @@ server.registerTool(
           }),
         )
         .min(1)
-        .max(100),
+        .max(MAX_BATCH_SIZE),
       confirm: z.boolean().default(false).describe('确认对这些候选人执行真实发送，必须为 true'),
+      confirmationText: z
+        .string()
+        .optional()
+        .describe('确认摘要，必须等于“确认给张三、李四发送消息”这类文本'),
+      dryRun: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe('仅校验并预览发送列表，不打开聊天也不发送消息'),
       waitForCompletion: z
         .boolean()
         .optional()
@@ -285,12 +509,32 @@ server.registerTool(
         .describe('是否等待全部发送完成；默认 false，避免页面首次加载导致 MCP 超时'),
     },
   },
-  async ({ messages, confirm, waitForCompletion }) =>
-    textResult(
+  async ({ messages, confirm, confirmationText, dryRun, waitForCompletion }) => {
+    const normalized = normalizeBatchMessages(messages);
+    if (dryRun) {
+      return textResult(
+        JSON.stringify(
+          {
+            ok: true,
+            dryRun: true,
+            total: normalized.length,
+            confirmationText: buildConfirmationText(normalized),
+            messages: normalized,
+          },
+          null,
+          2,
+        ),
+      );
+    }
+    if (confirm && confirmationText !== buildConfirmationText(normalized)) {
+      throw new Error(`确认文本不匹配。请传入：${buildConfirmationText(normalized)}`);
+    }
+    return textResult(
       waitForCompletion
-        ? await runBatchSendMessages(messages, confirm)
-        : startBatchSendMessages(messages, confirm),
-    ),
+        ? await runBatchSendMessagesWithLifecycle(normalized, confirm)
+        : startBatchSendMessages(normalized, confirm),
+    );
+  },
 );
 
 server.registerTool(
@@ -300,6 +544,7 @@ server.registerTool(
     inputSchema: { taskId: z.string().uuid() },
   },
   async ({ taskId }) => {
+    cleanupExpiredTasks();
     const task = batchTasks.get(taskId);
     if (!task) {
       throw new Error(`找不到批量发送任务: ${taskId}`);
@@ -388,6 +633,7 @@ server.registerTool(
     inputSchema: { taskId: z.string().uuid() },
   },
   async ({ taskId }) => {
+    cleanupExpiredTasks();
     const browserTask = asyncBrowserTasks.get(taskId);
     if (browserTask) {
       return textResult(JSON.stringify(browserTask, null, 2));
@@ -397,6 +643,67 @@ server.registerTool(
       return textResult(JSON.stringify(batchTask, null, 2));
     }
     throw new Error(`找不到异步任务: ${taskId}`);
+  },
+);
+
+server.registerTool(
+  'boss_cancel_task',
+  {
+    description: '请求取消正在运行的推荐、打招呼或批量发送任务。浏览器当前动作结束后才会停止。',
+    inputSchema: { taskId: z.string().uuid() },
+  },
+  async ({ taskId }) => {
+    cleanupExpiredTasks();
+    const batchTask = batchTasks.get(taskId);
+    const browserTask = asyncBrowserTasks.get(taskId);
+    const task = batchTask ?? browserTask;
+    if (!task) throw new Error(`找不到异步任务: ${taskId}`);
+    if (task.status !== 'running') {
+      return textResult(JSON.stringify({ taskId, status: task.status, cancelled: false }, null, 2));
+    }
+    task.cancelRequested = true;
+    taskControllers.get(taskId)?.abort(new Error('任务已请求取消。'));
+    return textResult(JSON.stringify({ taskId, status: 'cancelling', cancelled: true }, null, 2));
+  },
+);
+
+server.registerTool(
+  'boss_mcp_health',
+  {
+    description: '检查 MCP 进程、浏览器 CDP 连接、当前页面和异步任务状态。',
+    inputSchema: {},
+  },
+  async () => {
+    cleanupExpiredTasks();
+    const browser = getBrowserRef();
+    const page = getPageRef();
+    let currentUrl: string | null = null;
+    if (page && !page.isClosed()) {
+      try {
+        currentUrl = page.url();
+      } catch {
+        currentUrl = null;
+      }
+    }
+    return textResult(
+      JSON.stringify(
+        {
+          ok: true,
+          mcpVersion: MCP_VERSION,
+          pid: process.pid,
+          browserConnected: !!browser?.connected,
+          pageClosed: page ? page.isClosed() : null,
+          currentUrl,
+          activeTaskId: activeBrowserTaskId,
+          runningTasks:
+            [...batchTasks.values(), ...asyncBrowserTasks.values()].filter(
+              (task) => task.status === 'running',
+            ).length,
+        },
+        null,
+        2,
+      ),
+    );
   },
 );
 

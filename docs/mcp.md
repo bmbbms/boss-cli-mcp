@@ -14,6 +14,25 @@ node dist/mcp/index.js
 ```
 
 MCP 服务使用 stdio 通信，直接在终端运行时不会显示交互提示，这是正常行为。
+运行日志同时写入 `~/.boss-cli/logs/mcp.log`，并保留输出到 stderr；日志目录或文件无法创建时，MCP 会直接启动失败并报告原因。
+
+## npm 安装
+
+发布后的 npm 包名称为 `boss-cli-mcp`：
+
+```bash
+npm install -g boss-cli-mcp
+boss-cli-mcp
+```
+
+或者直接运行：
+
+```bash
+npx boss-cli-mcp
+```
+
+在 MCP 客户端中优先使用 `boss-cli-mcp` 作为 stdio `command`；如果客户端不继承
+系统 PATH，则将 `dist/mcp/index.js` 配置为绝对路径，并使用 Node.js 20 或更高版本。
 
 ## 客户端配置
 
@@ -52,6 +71,8 @@ Chrome 中完成登录。
 - `boss_preview_candidate`
 - `boss_greet_candidate`
 - `boss_async_task_status`
+- `boss_cancel_task`
+- `boss_mcp_health`
 - `boss_set_baidu_credentials`
 
 `boss_deep_search` 只有在 `match=true` 时才会执行匹配并消耗次数。发送消息、
@@ -73,14 +94,25 @@ Chrome 中完成登录。
       "exact": true
     }
   ],
-  "confirm": true
+  "confirm": true,
+  "confirmationText": "确认给张三、李四发送消息"
 }
 ```
+
+如需先检查名单和确认摘要而不产生任何浏览器操作，可设置 `dryRun: true`；正式发送时
+必须设置 `confirm: true`，并传入返回结果中的 `confirmationText`。
 
 建议先调用 `boss_list_candidates` 获取候选人姓名，确认列表无误后再调用批量工具。
 批量工具默认异步启动，立即返回 `taskId`，避免首次加载页面时触发 MCP 超时；随后使用
 `boss_batch_send_status` 查询进度和 `sent` / `failed` 结果。设置 `waitForCompletion=true`
 可以改为等待全部发送完成，但页面首次加载较慢时可能超时。工具不会自动发送求简历操作。
+
+任务运行时会实时更新 `processed`、`sent`、`failed`、`currentCandidate` 和 `results`。
+单次最多发送 20 人。
+同一 MCP 进程同时只允许一个浏览器写操作任务，避免多个任务切换同一个聊天页面。
+任务默认最长运行 30 分钟，完成后的任务状态在内存中保留 1 小时；MCP 重启后旧的
+`taskId` 不再可查询。可以调用 `boss_cancel_task` 请求取消任务，调用 `boss_mcp_health`
+检查 MCP、Chrome CDP 连接和当前页面。
 
 `boss_recommend` 和 `boss_greet_candidate` 也默认异步执行，立即返回 `taskId`。使用
 `boss_async_task_status` 查询结果；这样推荐页加载、列表刷新或平台风控等待不会阻塞 MCP 请求。

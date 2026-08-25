@@ -21,7 +21,7 @@ export const REMOTE_DEBUGGING_PORT: number = (() => {
     const n = Number.parseInt(raw, 10);
     if (Number.isFinite(n) && n > 0 && n <= 65535) return n;
   }
-  return 53470;
+  return 9222;
 })();
 
 let spawnedChromeChild: ChildProcess | null = null;
@@ -218,7 +218,7 @@ export type ConnectBrowserOptions = {
  * - `CHROME_PATH` / `PUPPETEER_EXECUTABLE_PATH` — 启动本机浏览器可执行文件路径（高于自动探测）
  * - `BOSS_BROWSER_USER_DATA_DIR` — 启动浏览器时复用的用户数据目录；未设置时默认 `~/.boss-cli/.cache/browser-data`
  * - `BOSS_BROWSER_PROFILE_DIRECTORY` — 启动浏览器时指定 profile（如 `Default`）
- * - `BOSS_BROWSER_REMOTE_DEBUGGING_PORT` — 远程调试端口（默认 53470）；同一 user-data-dir 跨命令复用该端口
+ * - `BOSS_BROWSER_REMOTE_DEBUGGING_PORT` — 远程调试端口（默认 9222）；同一 user-data-dir 跨命令复用该端口
  * - `BOSS_BROWSER_ALLOW_ALL_CORS` — 设为 `true` 时附加放宽同源/CORS 的启动参数（仅调试）
  * - `BOSS_BROWSER_DISABLE_GPU` — 设为 `true` 时附加 `--disable-gpu`
  *

@@ -56,6 +56,7 @@ type MenuListSnapshot = {
 type BossSessionPageOptions = {
   ensureChatShell?: boolean;
   ensureMenuList?: boolean;
+  retryOnContextDestroyed?: boolean;
 };
 
 function normalizeMenuText(raw: string | null | undefined): string {
@@ -136,6 +137,7 @@ export async function withBossSessionPage<T>(
 ): Promise<T> {
   const shouldEnsureChatShell = options.ensureChatShell !== false;
   const shouldEnsureMenuList = options.ensureMenuList !== false;
+  const retryOnContextDestroyed = options.retryOnContextDestroyed !== false;
 
   return withBossSessionLock(async () => {
     const isContextDestroyed = (e: unknown): boolean => {
@@ -179,7 +181,7 @@ export async function withBossSessionPage<T>(
       return await callback(page);
     } catch (e) {
       lastErr = e;
-      if (attempt < maxAttempts - 1 && isContextDestroyed(e)) {
+      if (retryOnContextDestroyed && attempt < maxAttempts - 1 && isContextDestroyed(e)) {
         // Boss 页面偶发跳转/重渲染会销毁执行上下文；短暂等待并重试一次即可。
         await sleepRandom(CONTEXT_DESTROY_RETRY_MS.min, CONTEXT_DESTROY_RETRY_MS.max);
         continue;
