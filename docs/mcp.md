@@ -51,6 +51,7 @@ Chrome 中完成登录。
 - `boss_recommend`
 - `boss_preview_candidate`
 - `boss_greet_candidate`
+- `boss_async_task_status`
 - `boss_set_baidu_credentials`
 
 `boss_deep_search` 只有在 `match=true` 时才会执行匹配并消耗次数。发送消息、
@@ -80,3 +81,6 @@ Chrome 中完成登录。
 批量工具默认异步启动，立即返回 `taskId`，避免首次加载页面时触发 MCP 超时；随后使用
 `boss_batch_send_status` 查询进度和 `sent` / `failed` 结果。设置 `waitForCompletion=true`
 可以改为等待全部发送完成，但页面首次加载较慢时可能超时。工具不会自动发送求简历操作。
+
+`boss_recommend` 和 `boss_greet_candidate` 也默认异步执行，立即返回 `taskId`。使用
+`boss_async_task_status` 查询结果；这样推荐页加载、列表刷新或平台风控等待不会阻塞 MCP 请求。

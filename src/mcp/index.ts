@@ -60,6 +60,44 @@ type BatchTask = {
 
 const batchTasks = new Map<string, BatchTask>();
 
+type AsyncBrowserTask = {
+  taskId: string;
+  operation: 'recommend' | 'greet';
+  status: 'running' | 'completed' | 'failed';
+  result?: string;
+  error?: string;
+};
+
+const asyncBrowserTasks = new Map<string, AsyncBrowserTask>();
+
+function startAsyncBrowserTask(
+  operation: AsyncBrowserTask['operation'],
+  run: () => Promise<string>,
+): string {
+  const taskId = randomUUID();
+  const task: AsyncBrowserTask = { taskId, operation, status: 'running' };
+  asyncBrowserTasks.set(taskId, task);
+  void run()
+    .then((result) => {
+      task.status = 'completed';
+      task.result = result;
+    })
+    .catch((error) => {
+      task.status = 'failed';
+      task.error = error instanceof Error ? error.message : String(error);
+    });
+  return JSON.stringify(
+    {
+      taskId,
+      operation,
+      status: task.status,
+      message: '异步任务已启动，请使用 boss_async_task_status 查询结果。',
+    },
+    null,
+    2,
+  );
+}
+
 async function runBatchSendMessages(
   messages: BatchMessage[],
   confirm: boolean,
@@ -309,10 +347,12 @@ server.registerTool(
 server.registerTool(
   'boss_recommend',
   {
-    description: '进入推荐页并读取推荐候选人列表，可按岗位关键字切换职位。',
+    description:
+      '异步进入推荐页并读取推荐候选人列表，可按岗位关键字切换职位。立即返回 taskId，避免页面加载导致 MCP 超时。',
     inputSchema: { jobKeyword: z.string().optional() },
   },
-  async ({ jobKeyword }) => textResult(await implRecommend(jobKeyword)),
+  async ({ jobKeyword }) =>
+    textResult(startAsyncBrowserTask('recommend', () => implRecommend(jobKeyword))),
 );
 
 server.registerTool(
@@ -327,14 +367,37 @@ server.registerTool(
 server.registerTool(
   'boss_greet_candidate',
   {
-    description: '在当前推荐或深度搜索列表中对候选人执行打招呼。',
+    description:
+      '异步在当前推荐或深度搜索列表中对候选人执行打招呼。立即返回 taskId，避免页面加载和风控等待导致 MCP 超时。',
     inputSchema: {
       candidateTarget: z.string().min(1),
       jobKeyword: z.string().optional(),
     },
   },
   async ({ candidateTarget, jobKeyword }) =>
-    textResult(await implRecommendGreet({ candidateTarget, jobKeyword })),
+    textResult(
+      startAsyncBrowserTask('greet', () => implRecommendGreet({ candidateTarget, jobKeyword })),
+    ),
+);
+
+server.registerTool(
+  'boss_async_task_status',
+  {
+    description:
+      '查询 boss_recommend、boss_greet_candidate 或批量发送工具返回的异步 taskId。',
+    inputSchema: { taskId: z.string().uuid() },
+  },
+  async ({ taskId }) => {
+    const browserTask = asyncBrowserTasks.get(taskId);
+    if (browserTask) {
+      return textResult(JSON.stringify(browserTask, null, 2));
+    }
+    const batchTask = batchTasks.get(taskId);
+    if (batchTask) {
+      return textResult(JSON.stringify(batchTask, null, 2));
+    }
+    throw new Error(`找不到异步任务: ${taskId}`);
+  },
 );
 
 server.registerTool(

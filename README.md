@@ -136,9 +136,10 @@ boss_login
 | `boss_list_positions` | 读取职位列表或职位详情 |
 | `boss_deep_search` | 设置深度搜索条件或执行匹配 |
 | `boss_normal_search` | 执行常规候选人搜索 |
-| `boss_recommend` | 读取推荐候选人 |
+| `boss_recommend` | 异步读取推荐候选人，返回 `taskId` |
 | `boss_preview_candidate` | 预览在线简历 |
-| `boss_greet_candidate` | 向推荐或搜索结果中的候选人打招呼 |
+| `boss_greet_candidate` | 异步向推荐或搜索结果中的候选人打招呼，返回 `taskId` |
+| `boss_async_task_status` | 查询推荐、打招呼和批量发送任务 |
 | `boss_set_baidu_credentials` | 设置百度 OCR 凭据 |
 
 ## 批量回复消息
@@ -222,6 +223,17 @@ boss_login
 - `waitForCompletion`：默认 `false`。不建议改成 `true`，否则首次加载页面时可能触发 MCP 客户端超时。
 
 批量工具会串行处理候选人，并记录每人的 `sent` 或 `failed` 状态。单个候选人失败不会阻止后续候选人继续执行。
+
+### 推荐和打招呼任务
+
+`boss_recommend` 与 `boss_greet_candidate` 默认立即返回 `taskId`，不会等待页面加载完成。
+使用 `boss_async_task_status` 查询：
+
+```json
+{
+  "taskId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+}
+```
 
 ## 在 AI 客户端中的示例提示词
 
