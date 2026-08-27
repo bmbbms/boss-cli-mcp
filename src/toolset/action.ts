@@ -435,8 +435,8 @@ async function runIncomingResumeCardAction(page: Page, which: IncomingCardBtn): 
   await ensureInCandidateChat(page, '附件简历处理');
   await sleepRandom(200, 550);
 
-  const result = (await page.evaluate((w: 'agree' | 'refuse') => {
-    function norm(v: string | null | undefined) {
+  const result = (await page.evaluate(`((which) => {
+    function norm(v) {
       return (v ?? "").replace(/\\s+/g, " ").trim();
     }
     function isDisabledBtn(el: Element) {
@@ -462,17 +462,17 @@ async function runIncomingResumeCardAction(page: Page, which: IncomingCardBtn): 
       for (let j = 0; j < buttons.length; j++) {
         const btn = buttons[j];
         const t = norm(btn.textContent);
-        if (!matchesLabel(t, w)) continue;
+        if (!matchesLabel(t, which)) continue;
         if (isDisabledBtn(btn)) {
-          return { kind: "already_handled", which: w };
+          return { kind: "already_handled", which };
         }
         (btn as HTMLElement).scrollIntoView({ block: "center", inline: "nearest" });
         (btn as HTMLElement).click();
-        return { kind: "clicked", which: w };
+        return { kind: "clicked", which };
       }
     }
-    return { kind: "not_found", which: w };
-  }, which)) as
+    return { kind: "not_found", which };
+  })(${JSON.stringify(which)})`)) as
     | { kind: 'clicked'; which: IncomingCardBtn }
     | { kind: 'already_handled'; which: IncomingCardBtn }
     | { kind: 'not_found'; which: IncomingCardBtn };
@@ -511,13 +511,13 @@ async function captureOnlineResumeScreenshot(page: Page, candidateLabel: string)
 
   const savedViewport = await snapshotBossPageViewport(page);
 
-  const opened = await page.evaluate(() => {
-    const a = document.querySelector('a.resume-btn-online') as HTMLAnchorElement | null;
-    if (!a || a.classList.contains('disabled')) return false;
-    a.scrollIntoView({ block: 'center', inline: 'nearest' });
+  const opened = (await page.evaluate(`(() => {
+    const a = document.querySelector("a.resume-btn-online");
+    if (!(a instanceof HTMLAnchorElement) || a.classList.contains("disabled")) return false;
+    a.scrollIntoView({ block: "center", inline: "nearest" });
     a.click();
     return true;
-  });
+  })()`)) as boolean;
   if (!opened) {
     return null;
   }

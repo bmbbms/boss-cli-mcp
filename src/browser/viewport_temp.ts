@@ -62,11 +62,11 @@ export async function snapshotBossPageViewport(page: Page): Promise<BossViewport
       isLandscape: v.isLandscape ?? false,
     };
   }
-  const dims = await page.evaluate(() => ({
+  const dims = (await page.evaluate(`(() => ({
     width: window.innerWidth,
     height: window.innerHeight,
     dpr: window.devicePixelRatio || 1,
-  }));
+  }))()`)) as { width: number; height: number; dpr: number };
   const width = Math.max(320, Math.round(dims.width));
   const height = Math.max(240, Math.round(dims.height));
   return {
