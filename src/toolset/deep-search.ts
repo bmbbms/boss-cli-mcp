@@ -12,6 +12,12 @@ import { ensurePage } from '../common/ensure_page.js';
 
 const BOSS_CHAT_AI_FORM_URL = 'https://www.zhipin.com/web/chat/aiform';
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : new Error('任务已取消。');
+  }
+}
+
 type SearchFormSnapshot = {
   selectedJob: string;
   coreRequirements: string[];
@@ -1264,7 +1270,12 @@ async function waitForAiFormJobSelected(page: Page, expectedLabel: string): Prom
   await ensureInDeepSearchPage(page);
 }
 
-export async function selectAiFormJob(page: Page, keyword: string): Promise<string> {
+export async function selectAiFormJob(
+  page: Page,
+  keyword: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  throwIfAborted(signal);
   const kw = keyword.trim();
   if (!kw) {
     throw new Error('岗位关键字不能为空。');
@@ -1281,8 +1292,9 @@ export async function selectAiFormJob(page: Page, keyword: string): Promise<stri
   if (!opened) {
     throw new Error('未找到深度搜索页岗位下拉（.job-dropmenu-select）。');
   }
-  await sleepRandom(JOB_SELECT_ACTION_GAP_MS.min, JOB_SELECT_ACTION_GAP_MS.max);
+  await sleepRandom(JOB_SELECT_ACTION_GAP_MS.min, JOB_SELECT_ACTION_GAP_MS.max, signal);
   await waitForAiFormJobDropdownReady(page);
+  throwIfAborted(signal);
 
   const searched = (await page.evaluate(`(() => {
     const kw = ${kwLiteral};
@@ -1304,8 +1316,9 @@ export async function selectAiFormJob(page: Page, keyword: string): Promise<stri
     return true;
   })()`)) as boolean;
   if (searched) {
-    await sleepRandom(JOB_SEARCH_ACTION_GAP_MS.min, JOB_SEARCH_ACTION_GAP_MS.max);
+    await sleepRandom(JOB_SEARCH_ACTION_GAP_MS.min, JOB_SEARCH_ACTION_GAP_MS.max, signal);
     await waitForAiFormJobSearchResults(page, kw);
+    throwIfAborted(signal);
   }
 
   const picked = (await page.evaluate(`(() => {
@@ -1337,8 +1350,9 @@ export async function selectAiFormJob(page: Page, keyword: string): Promise<stri
     throw new Error(`未找到匹配岗位「${kw}」。`);
   }
   const label = picked.label ?? kw;
-  await sleepRandom(JOB_SELECT_ACTION_GAP_MS.min, JOB_SELECT_ACTION_GAP_MS.max);
+  await sleepRandom(JOB_SELECT_ACTION_GAP_MS.min, JOB_SELECT_ACTION_GAP_MS.max, signal);
   await waitForAiFormJobSelected(page, label);
+  throwIfAborted(signal);
   return label;
 }
 
@@ -1472,7 +1486,12 @@ export function renderGeekListSection(title: string, items: DeepSearchGeekItem[]
   return lines.join('\n').trimEnd();
 }
 
-export async function clickGreetDeepSearch(page: Page, target: string): Promise<{ message: string }> {
+export async function clickGreetDeepSearch(
+  page: Page,
+  target: string,
+  signal?: AbortSignal,
+): Promise<{ message: string }> {
+  throwIfAborted(signal);
   const targetLiteral = JSON.stringify(target.trim());
   const result = (await page.evaluate(
     `(() => {

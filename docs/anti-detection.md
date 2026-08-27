@@ -1,5 +1,15 @@
 # Boss 反自动化检测：防御策略文档
 
+## 2026-08-26 baseline review
+
+- Captured snapshot: `docs/research/boss-online-js/2026-08-26`.
+- Boss index changed from `v10687` to `v11173`; Boss bundle changed from `v6214` to `v6334`; Zhipin sign changed from `v5309` to `v5312`.
+- Chat Warlock changed from `warlockdata.min.2.2.14.js` to `warlockdata.min.2.2.15.js`; APM, MQTT, browser-check, and sign iframe-core hashes were unchanged.
+- Same-URL hash changes: 0. The new risk detector preserves codes `99001`, `99002`, `99004`, and `99005`, `srcdoc`/`MutationObserver`/`isTrusted` checks, and the existing reporting flow.
+- The new sign vendor preserves the existing DevTools/anti-debug checks and `/web/passport/{zp,cm}/{403,verify,security}` navigation targets.
+- `src/common/boss_availability.ts` was updated with the archived 2026-08-26 URLs and SHA-256 hashes.
+- `src/common/boss_page_guards.ts` request guards still cover the observed risk/security/report URLs; no new guard pattern was required.
+
 ## 2026-07-13 baseline review
 
 - Captured snapshot: `docs/research/boss-online-js/2026-07-13`.

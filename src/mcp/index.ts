@@ -177,7 +177,7 @@ function normalizeBatchMessages(messages: BatchMessage[]): BatchMessage[] {
 
 function startAsyncBrowserTask(
   operation: AsyncBrowserTask['operation'],
-  run: () => Promise<string>,
+  run: (signal: AbortSignal) => Promise<string>,
 ): string {
   if (activeBrowserTaskId) {
     throw new Error(`已有浏览器异步任务正在运行：${activeBrowserTaskId}`);
@@ -193,7 +193,7 @@ function startAsyncBrowserTask(
     task.cancelRequested = true;
     controller.abort(new Error(`异步任务超过 ${TASK_TIMEOUT_MS / 1000}s，已请求停止。`));
   }, TASK_TIMEOUT_MS);
-  void run()
+  void run(controller.signal)
     .then((result) => {
       clearTimeout(timeout);
       if (task.cancelRequested) {
@@ -597,7 +597,7 @@ server.registerTool(
     inputSchema: { jobKeyword: z.string().optional() },
   },
   async ({ jobKeyword }) =>
-    textResult(startAsyncBrowserTask('recommend', () => implRecommend(jobKeyword))),
+    textResult(startAsyncBrowserTask('recommend', (signal) => implRecommend(jobKeyword, signal))),
 );
 
 server.registerTool(
@@ -621,7 +621,9 @@ server.registerTool(
   },
   async ({ candidateTarget, jobKeyword }) =>
     textResult(
-      startAsyncBrowserTask('greet', () => implRecommendGreet({ candidateTarget, jobKeyword })),
+      startAsyncBrowserTask('greet', (signal) =>
+        implRecommendGreet({ candidateTarget, jobKeyword, signal }),
+      ),
     ),
 );
 

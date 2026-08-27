@@ -118,8 +118,8 @@ export async function implBossSearchSet(opts: {
   return runBossSearchSet(opts);
 }
 
-export async function implRecommend(jobKeyword?: string): Promise<string> {
-  return runRecommend(jobKeyword);
+export async function implRecommend(jobKeyword?: string, signal?: AbortSignal): Promise<string> {
+  return runRecommend(jobKeyword, signal);
 }
 
 export async function implPreview(opts: {
@@ -131,6 +131,7 @@ export async function implPreview(opts: {
 export async function implRecommendGreet(opts: {
   candidateTarget: string;
   jobKeyword?: string;
+  signal?: AbortSignal;
 }): Promise<string> {
   return runRecommendGreet(opts);
 }

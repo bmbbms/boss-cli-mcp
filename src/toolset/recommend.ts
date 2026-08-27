@@ -37,6 +37,12 @@ const RECOMMEND_CARD_ROOT_SELECTOR =
 const RECOMMEND_SCROLL_MAX_ROUNDS = 12;
 const RECOMMEND_SCROLL_WAIT_MS = 1_200;
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : new Error('任务已取消。');
+  }
+}
+
 export function isBossChatRecommendUrl(url: string): boolean {
   try {
     const u = new URL(url);
@@ -93,11 +99,12 @@ async function ensureRecommendFrameReady(frame: Frame): Promise<void> {
  * 推荐页是 iframe 内的文档滚动，不是 `.card-list` 自身滚动。
  * 到底后页面才会触发下一批候选人加载；逐轮滚到底并等待 DOM 增长，直到页面明确显示“没有更多了”。
  */
-async function loadAllRecommendCards(frame: Frame): Promise<void> {
+async function loadAllRecommendCards(frame: Frame, signal?: AbortSignal): Promise<void> {
   let previousCount = 0;
   let stableRounds = 0;
 
   for (let round = 0; round < RECOMMEND_SCROLL_MAX_ROUNDS; round += 1) {
+    throwIfAborted(signal);
     const before = (await frame.evaluate(`(() => {
       const count = document.querySelectorAll(${JSON.stringify(RECOMMEND_CARD_ROOT_SELECTOR)}).length;
       const text = document.body?.innerText ?? "";
@@ -107,7 +114,7 @@ async function loadAllRecommendCards(frame: Frame): Promise<void> {
     })()`)) as { count: number; end: boolean };
 
     if (before.end) return;
-    await sleepRandom(RECOMMEND_SCROLL_WAIT_MS, RECOMMEND_SCROLL_WAIT_MS + 300);
+    await sleepRandom(RECOMMEND_SCROLL_WAIT_MS, RECOMMEND_SCROLL_WAIT_MS + 300, signal);
 
     const after = (await frame.evaluate(`(() => ({
       count: document.querySelectorAll(${JSON.stringify(RECOMMEND_CARD_ROOT_SELECTOR)}).length,
@@ -180,7 +187,12 @@ async function waitForRecommendJobSelected(frame: Frame, expectedLabel: string):
   await ensureRecommendFrameReady(frame);
 }
 
-export async function selectRecommendJob(frame: Frame, keyword: string): Promise<string> {
+export async function selectRecommendJob(
+  frame: Frame,
+  keyword: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  throwIfAborted(signal);
   const kw = keyword.trim();
   if (!kw) {
     return readCurrentRecommendJobLabel(frame);
@@ -197,8 +209,9 @@ export async function selectRecommendJob(frame: Frame, keyword: string): Promise
   if (!opened) {
     throw new Error('未找到岗位下拉入口（.job-selecter-wrap .ui-dropmenu-label）。');
   }
-  await sleepRandom(JOB_SELECT_ACTION_GAP_MS.min, JOB_SELECT_ACTION_GAP_MS.max);
+  await sleepRandom(JOB_SELECT_ACTION_GAP_MS.min, JOB_SELECT_ACTION_GAP_MS.max, signal);
   await waitForRecommendJobDropdownReady(frame);
+  throwIfAborted(signal);
 
   const searched = (await frame.evaluate(`(() => {
     const kw = ${kwLiteral};
@@ -213,8 +226,9 @@ export async function selectRecommendJob(frame: Frame, keyword: string): Promise
   if (!searched) {
     throw new Error('已打开岗位下拉，但未找到职位搜索框（.chat-job-search）。');
   }
-  await sleepRandom(JOB_SEARCH_ACTION_GAP_MS.min, JOB_SEARCH_ACTION_GAP_MS.max);
+  await sleepRandom(JOB_SEARCH_ACTION_GAP_MS.min, JOB_SEARCH_ACTION_GAP_MS.max, signal);
   await waitForRecommendJobSearchResults(frame, kw);
+  throwIfAborted(signal);
 
   const picked = (await frame.evaluate(`(() => {
     const kw = ${kwLiteral};
@@ -237,8 +251,9 @@ export async function selectRecommendJob(frame: Frame, keyword: string): Promise
     throw new Error(`未找到匹配岗位“${kw}”。`);
   }
   const label = picked.label ?? kw;
-  await sleepRandom(JOB_SELECT_ACTION_GAP_MS.min, JOB_SELECT_ACTION_GAP_MS.max);
+  await sleepRandom(JOB_SELECT_ACTION_GAP_MS.min, JOB_SELECT_ACTION_GAP_MS.max, signal);
   await waitForRecommendJobSelected(frame, label);
+  throwIfAborted(signal);
   return label;
 }
 
@@ -396,7 +411,9 @@ export function renderRecommendList(candidates: RecommendCandidate[]): string {
 export async function clickGreet(
   frame: Frame,
   target: string,
+  signal?: AbortSignal,
 ): Promise<{ message: string }> {
+  throwIfAborted(signal);
   const targetLiteral = JSON.stringify(target.trim());
   const result = (await frame.evaluate(
     `(() => {
@@ -455,6 +472,7 @@ export async function clickGreet(
     case 'disabled':
       throw new Error(`候选人 ${result.name} 已打招呼。`);
     case 'clicked':
+      throwIfAborted(signal);
       return {
         message: `已对 ${result.name} 点击“打招呼”。`,
       };
@@ -534,12 +552,16 @@ export async function openRecommendResumePreview(frame: Frame, target: string): 
   return opened;
 }
 
-export async function runRecommend(jobKeyword?: string): Promise<string> {
+export async function runRecommend(jobKeyword?: string, signal?: AbortSignal): Promise<string> {
   try {
+    throwIfAborted(signal);
     return await withBossSessionPage(async (page) => {
+      throwIfAborted(signal);
       const frame = await ensureInRecommendPage(page);
-      const selectedJob = await selectRecommendJob(frame, (jobKeyword ?? '').trim());
-      await loadAllRecommendCards(frame);
+      throwIfAborted(signal);
+      const selectedJob = await selectRecommendJob(frame, (jobKeyword ?? '').trim(), signal);
+      await loadAllRecommendCards(frame, signal);
+      throwIfAborted(signal);
       const candidates = await readRecommendList(frame);
       const title = selectedJob ? `当前岗位：${selectedJob}` : '当前岗位：默认';
       return [title, '', renderRecommendList(candidates)].join('\n');

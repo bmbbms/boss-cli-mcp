@@ -55,29 +55,39 @@ async function cleanupGreetModalIfPresent(page: Page): Promise<void> {
 export type GreetOptions = {
   candidateTarget: string;
   jobKeyword?: string;
+  signal?: AbortSignal;
 };
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : new Error('任务已取消。');
+  }
+}
 
 export async function runRecommendGreet(options: GreetOptions): Promise<string> {
   const t = options.candidateTarget.trim();
   const kw = (options.jobKeyword ?? '').trim();
+  const signal = options.signal;
   if (!t) {
     throw new Error('请提供打招呼目标（姓名）。');
   }
   try {
+    throwIfAborted(signal);
     return await withBossSessionPage(async (page) => {
+      throwIfAborted(signal);
       await closeBossModalIfPresent(page);
       const url = page.url();
       if (isBossChatAiFormUrl(url)) {
         await ensureInDeepSearchPage(page);
         let jobLine = '';
         if (kw) {
-          const label = await selectAiFormJob(page, kw);
+          const label = await selectAiFormJob(page, kw, signal);
           await ensureInDeepSearchPage(page);
           jobLine = `当前岗位：${label}`;
         }
-        const greetResult = await clickGreetDeepSearch(page, t);
+        const greetResult = await clickGreetDeepSearch(page, t, signal);
         await assertNoGreetPaywallPopup(page);
-        await sleepRandom(380, 1000);
+        await sleepRandom(380, 1000, signal);
         const after = await readDeepSearchGeekList(page);
         await cleanupGreetModalIfPresent(page);
         const lines = [greetResult.message];
@@ -89,7 +99,7 @@ export async function runRecommendGreet(options: GreetOptions): Promise<string> 
       }
 
       const frame = await assertRecommendPageReady(page, '打招呼');
-      const selectedJob = await selectRecommendJob(frame, kw);
+      const selectedJob = await selectRecommendJob(frame, kw, signal);
       const jobLine = selectedJob ? `当前岗位：${selectedJob}` : '当前岗位：默认';
       const savedViewport = await snapshotBossPageViewport(page);
       try {
@@ -97,11 +107,13 @@ export async function runRecommendGreet(options: GreetOptions): Promise<string> 
         await sleepRandom(
           RECOMMEND_GREET_EXPAND_SETTLE_MS.min,
           RECOMMEND_GREET_EXPAND_SETTLE_MS.max,
+          signal,
         );
+        throwIfAborted(signal);
         const before = await readRecommendList(frame);
-        const greetResult = await clickGreet(frame, t);
+        const greetResult = await clickGreet(frame, t, signal);
         await assertNoGreetPaywallPopup(page);
-        await sleepRandom(380, 1000);
+        await sleepRandom(380, 1000, signal);
         const after = await readRecommendList(frame);
         markGreetProduced(before, after);
         await cleanupGreetModalIfPresent(page);
