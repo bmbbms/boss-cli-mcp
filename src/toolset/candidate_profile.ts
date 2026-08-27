@@ -52,7 +52,11 @@ export function parseCandidateProfile(input: Omit<CandidateProfile, 'gender' | '
   const ageMatch = raw.match(/(?:年龄\s*[:：]?\s*(\d{2})|(\d{2})\s*岁)/);
   const schoolMatch = raw.match(/([\u4e00-\u9fa5A-Za-z]{2,}(?:大学|学院|职业技术学院))/);
   const eduMatch = raw.match(/博士|硕士|研究生|本科|大专|专科|高中|中专|初中/);
-  const workMatch = raw.match(/(\d+(?:\.\d+)?)\s*(?:年|年以上|年工作经验)/);
+  const workCandidates = [...raw.matchAll(/(\d+(?:\.\d+)?)\s*(?:年以上|年工作经验|年经验|年)/g)];
+  const workMatch = workCandidates.find((m) => {
+    const tail = raw.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 4);
+    return !/应届|毕业|届/.test(tail);
+  });
   const locationMatch = raw.match(/(?:现居|所在地|城市|地点)\s*[:：]?\s*([\u4e00-\u9fa5A-Za-z]{2,12})/);
   return {
     ...input,
