@@ -74,6 +74,7 @@ Chrome 中完成登录。
 - `boss_cancel_task`
 - `boss_mcp_health`
 - `boss_set_baidu_credentials`
+- `boss_candidate_automation`
 
 `boss_deep_search` 只有在 `match=true` 时才会执行匹配并消耗次数。发送消息、
 打招呼、查看在线简历等操作会真实影响 Boss 账号，请在调用前确认参数。
@@ -116,3 +117,5 @@ Chrome 中完成登录。
 
 `boss_recommend` 和 `boss_greet_candidate` 也默认异步执行，立即返回 `taskId`。使用
 `boss_async_task_status` 查询结果；这样推荐页加载、列表刷新或平台风控等待不会阻塞 MCP 请求。
+
+`boss_candidate_automation` 支持 `scope=recommend` 分析当前推荐卡片，`scope=chat` 分析当前打开会话，或 `scope=chat-list` 依次处理当前会话列表。`chat-list` 会自动识别列表滚动容器，逐轮滚动并累计虚拟列表中的候选人，直到到达底部且连续无新增，再恢复到列表顶部。默认 `execute=false` 只分析和匹配；执行真实打招呼、回复、求简历或标记不合适时必须同时设置 `execute=true` 和 `confirm=true`。发送前会检查聊天记录和本地 `~/.boss-cli/.cache/candidate-actions.json`，避免重复发送。
