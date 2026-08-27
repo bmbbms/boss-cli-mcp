@@ -117,13 +117,14 @@ const batchTasks = new Map<string, BatchTask>();
 
 type AsyncBrowserTask = {
   taskId: string;
-  operation: 'recommend' | 'greet';
+  operation: 'recommend' | 'greet' | 'candidate_automation';
   status: 'running' | 'completed' | 'failed' | 'cancelled';
   startedAt: string;
   completedAt?: string;
   cancelRequested?: boolean;
   result?: string;
   error?: string;
+  progress?: { phase: string; total: number; processed: number; currentCandidate?: string; matched: number; failed: number };
 };
 
 const asyncBrowserTasks = new Map<string, AsyncBrowserTask>();
@@ -229,6 +230,22 @@ function startAsyncBrowserTask(
     null,
     2,
   );
+}
+
+function startCandidateAutomationTask(options: Parameters<typeof runCandidateAutomation>[0]): string {
+  if (activeBrowserTaskId) throw new Error(`已有浏览器异步任务正在运行：${activeBrowserTaskId}`);
+  const taskId = randomUUID();
+  const controller = new AbortController();
+  const task: AsyncBrowserTask = { taskId, operation: 'candidate_automation', status: 'running', startedAt: nowIso(), progress: { phase: 'starting', total: 0, processed: 0, matched: 0, failed: 0 } };
+  asyncBrowserTasks.set(taskId, task);
+  taskControllers.set(taskId, controller);
+  activeBrowserTaskId = taskId;
+  const timeout = setTimeout(() => { task.cancelRequested = true; controller.abort(new Error(`异步任务超过 ${TASK_TIMEOUT_MS / 1000}s，已请求停止。`)); }, TASK_TIMEOUT_MS);
+  void runCandidateAutomation({ ...options, onProgress: (p) => { task.progress = p; } })
+    .then((result) => { task.status = task.cancelRequested ? 'cancelled' : 'completed'; task.result = result; task.completedAt = nowIso(); })
+    .catch((error) => { task.status = task.cancelRequested ? 'cancelled' : 'failed'; task.error = error instanceof Error ? error.message : String(error); task.completedAt = nowIso(); })
+    .finally(() => { clearTimeout(timeout); taskControllers.delete(taskId); if (activeBrowserTaskId === taskId) activeBrowserTaskId = null; });
+  return JSON.stringify({ taskId, operation: 'candidate_automation', status: 'running', message: '会话列表分析已异步启动，请使用 boss_async_task_status 查询进度。' }, null, 2);
 }
 
 async function runBatchSendMessages(
@@ -413,6 +430,7 @@ server.registerTool(
       message: z.string().optional(),
       requestResume: z.boolean().optional().default(false),
       receiveResume: z.boolean().optional().default(false),
+      batchSize: z.number().int().min(1).max(20).optional().default(5),
       requirements: z.object({
         gender: z.enum(['男', '女', '不限']).optional(),
         ageMin: z.number().int().optional(),
@@ -426,16 +444,11 @@ server.registerTool(
       }).optional(),
     },
   },
-  async ({ scope, execute, confirm, message, requestResume, receiveResume, requirements }) =>
-    textResult(await runCandidateAutomation({
-      scope,
-      execute,
-      confirm,
-      message,
-      requestResume,
-      receiveResume,
-      requirements: requirements as CandidateRequirements | undefined,
-    })),
+  async ({ scope, execute, confirm, message, requestResume, receiveResume, batchSize, requirements }) => {
+    const options = { scope, execute, confirm, message, requestResume, receiveResume, batchSize, requirements: requirements as CandidateRequirements | undefined } as Parameters<typeof runCandidateAutomation>[0];
+    if (scope === 'chat-list') return textResult(startCandidateAutomationTask(options));
+    return textResult(await runCandidateAutomation(options));
+  },
 );
 
 server.registerTool(

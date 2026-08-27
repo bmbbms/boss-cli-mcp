@@ -16,6 +16,8 @@ export type AutomationOptions = {
   message?: string;
   requestResume?: boolean;
   receiveResume?: boolean;
+  batchSize?: number;
+  onProgress?: (progress: { phase: string; total: number; processed: number; currentCandidate?: string; matched: number; failed: number }) => void;
 };
 
 type Result = { candidate: CandidateProfile; match: ReturnType<typeof matchCandidateProfile>; action: string };
@@ -127,6 +129,7 @@ export async function runCandidateAutomation(options: AutomationOptions): Promis
   const execute = options.execute === true;
   if (execute && options.confirm !== true) throw new Error('执行真实操作必须显式设置 confirm=true。');
   const message = (options.message ?? '').trim();
+  const batchSize = Math.max(1, Math.min(20, Math.floor(options.batchSize ?? 5)));
   if (execute && (options.scope === 'chat' || options.scope === 'chat-list') && !message) throw new Error('execute=true 时必须提供 message。');
   return withBossSessionPage(async (page) => {
     const results: Result[] = [];
@@ -148,12 +151,18 @@ export async function runCandidateAutomation(options: AutomationOptions): Promis
       const names = options.scope === 'chat-list' ? await collectAllChatNames(page) : [];
       if (options.scope === 'chat-list') await resetChatListScroll(page);
       const targets = options.scope === 'chat-list' ? (names as string[]) : [''];
-      for (const target of targets) {
-        if (target) await runOpenCandidateChat(page, target, true);
-        const profile = await chatProfile(page);
-        const match = matchCandidateProfile(profile, req);
-        let action = match.matched ? '符合条件' : '不符合条件';
-        if (execute) {
+      let matchedCount = 0;
+      let failedCount = 0;
+      options.onProgress?.({ phase: 'collected', total: targets.length, processed: 0, matched: 0, failed: 0 });
+      for (let i = 0; i < targets.length; i += 1) {
+        const target = targets[i]!;
+        try {
+          if (target) await runOpenCandidateChat(page, target, true);
+          const profile = await chatProfile(page);
+          const match = matchCandidateProfile(profile, req);
+          let action = match.matched ? '符合条件' : '不符合条件';
+          if (match.matched) matchedCount += 1;
+          if (execute) {
           const key = `message:${profile.name}`;
           const hash = messageFingerprint(message);
           if (match.matched) {
@@ -173,8 +182,15 @@ export async function runCandidateAutomation(options: AutomationOptions): Promis
             await runChatActionOnCurrentConversation(page, { action: 'not-fit' });
             action = '已标记不合适';
           }
+          }
+          results.push({ candidate: profile, match, action });
+        } catch (error) {
+          failedCount += 1;
+          const candidate = parseCandidateProfile({ name: target, rawText: target });
+          results.push({ candidate, match: { matched: false, reasons: [], unknown: ['读取失败'] }, action: `失败：${error instanceof Error ? error.message : String(error)}` });
         }
-        results.push({ candidate: profile, match, action });
+        options.onProgress?.({ phase: 'processing', total: targets.length, processed: i + 1, currentCandidate: target, matched: matchedCount, failed: failedCount });
+        if ((i + 1) % batchSize === 0 && i + 1 < targets.length) await sleepRandom(180, 360);
       }
     }
     return JSON.stringify({ execute, scope: options.scope, results }, null, 2);
