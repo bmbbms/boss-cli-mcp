@@ -25,8 +25,10 @@ import {
   implRecommendGreet,
   implSendMessage,
   implSetBaiduCredentials,
+  runCandidateAutomation,
   type ChatPageAction,
 } from '../toolset/index.js';
+import type { CandidateRequirements } from '../toolset/candidate_profile.js';
 import { getBrowserRef, getPageRef } from '../browser/browser_session.js';
 
 const require = createRequire(import.meta.url);
@@ -399,6 +401,42 @@ const server = new McpServer({
   name: 'boss-cli',
   version: MCP_VERSION,
 });
+
+server.registerTool(
+  'boss_candidate_automation',
+  {
+    description: '分析推荐页或当前会话候选人简历字段，并按职位条件预览或执行打招呼/回复/求简历/不合适操作。',
+    inputSchema: {
+      scope: z.enum(['recommend', 'chat', 'chat-list']),
+      execute: z.boolean().optional().default(false),
+      confirm: z.boolean().optional().default(false),
+      message: z.string().optional(),
+      requestResume: z.boolean().optional().default(false),
+      receiveResume: z.boolean().optional().default(false),
+      requirements: z.object({
+        gender: z.enum(['男', '女', '不限']).optional(),
+        ageMin: z.number().int().optional(),
+        ageMax: z.number().int().optional(),
+        educationMin: z.string().optional(),
+        workYearsMin: z.number().optional(),
+        workYearsMax: z.number().optional(),
+        positionKeywords: z.array(z.string()).optional(),
+        salaryMin: z.number().optional(),
+        locationKeywords: z.array(z.string()).optional(),
+      }).optional(),
+    },
+  },
+  async ({ scope, execute, confirm, message, requestResume, receiveResume, requirements }) =>
+    textResult(await runCandidateAutomation({
+      scope,
+      execute,
+      confirm,
+      message,
+      requestResume,
+      receiveResume,
+      requirements: requirements as CandidateRequirements | undefined,
+    })),
+);
 
 server.registerTool(
   'boss_login',

@@ -14,6 +14,7 @@ import { runNormalSearch } from './normal-search.js';
 import { runRecommend } from './recommend.js';
 import { runPreview } from './preview.js';
 import { runRecommendGreet } from './greet.js';
+export { runCandidateAutomation } from './automation.js';
 export type { ChatPageAction };
 export type { DeepSearchGeekItem } from './deep-search.js';
 
