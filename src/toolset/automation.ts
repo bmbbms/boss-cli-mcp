@@ -5,7 +5,7 @@ import { isBossChatIndexUrl } from '../common/auth.js';
 import { assertRecommendPageReady, clickGreet, readRecommendList } from './recommend.js';
 import { runChatActionOnCurrentConversation } from './action.js';
 import { runSendChatMessageOnPage } from './send.js';
-import { runOpenCandidateChat, runOpenCandidateChatById } from './chat.js';
+import { runOpenCandidateChatById } from './chat.js';
 import { matchCandidateProfile, messageFingerprint, parseCandidateProfile, recordAction, hasActionBeenRecorded, type CandidateRequirements, type CandidateProfile } from './candidate_profile.js';
 
 export type AutomationOptions = {
@@ -53,56 +53,6 @@ async function collectAllChatEntries(page: Page): Promise<ChatListEntry[]> {
 
 const CHAT_LIST_SCROLL_MAX_ROUNDS = 80;
 const CHAT_LIST_SCROLL_WAIT_MS = { min: 450, max: 850 } as const;
-
-async function collectAllChatNames(page: Page): Promise<string[]> {
-  const names = new Set<string>();
-  let stableRounds = 0;
-  let previousSignature = '';
-  for (let round = 0; round < CHAT_LIST_SCROLL_MAX_ROUNDS; round += 1) {
-    const state = (await page.evaluate(`(() => {
-      const norm = (v) => (v ?? '').replace(/\\s+/g, ' ').trim();
-      const rows = Array.from(document.querySelectorAll('.geek-item-wrap'));
-      const visibleNames = rows.map((row) => norm(row.querySelector('.geek-name')?.textContent)).filter(Boolean);
-      let node = document.querySelector('.user-list') || rows[0]?.parentElement || null;
-      let scroller = null;
-      while (node) {
-        const style = window.getComputedStyle(node);
-        const canScroll = (style.overflowY === 'auto' || style.overflowY === 'scroll' || style.overflowY === 'hidden') && node.scrollHeight > node.clientHeight;
-        if (canScroll) { scroller = node; break; }
-        node = node.parentElement;
-      }
-      if (!scroller) {
-        const root = document.scrollingElement || document.documentElement;
-        const before = root.scrollTop;
-        const height = Math.max(root.scrollHeight, document.body?.scrollHeight ?? 0);
-        const client = window.innerHeight;
-        root.scrollTop = Math.min(before + Math.max(180, Math.floor(client * 0.82)), height);
-        const moved = root.scrollTop !== before;
-        const atEnd = root.scrollTop + client >= height - 2;
-        return { names: visibleNames, moved, atEnd, top: root.scrollTop, height, client };
-      }
-      const before = scroller.scrollTop;
-      const step = Math.max(180, Math.floor(scroller.clientHeight * 0.82));
-      scroller.scrollTop = Math.min(scroller.scrollTop + step, scroller.scrollHeight);
-      const moved = scroller.scrollTop !== before;
-      const atEnd = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2;
-      return { names: visibleNames, moved, atEnd, top: scroller.scrollTop, height: scroller.scrollHeight, client: scroller.clientHeight };
-    })()`)) as { names: string[]; moved: boolean; atEnd: boolean; top: number; height: number; client: number };
-
-    const beforeSize = names.size;
-    for (const name of state.names) names.add(name);
-    const signature = `${names.size}:${state.top}:${state.height}:${state.atEnd}`;
-    if (names.size === beforeSize && signature === previousSignature) stableRounds += 1;
-    else stableRounds = 0;
-    previousSignature = signature;
-
-    if (state.atEnd && stableRounds >= 2) break;
-    if (!state.moved && state.atEnd && stableRounds >= 1) break;
-    await sleepRandom(CHAT_LIST_SCROLL_WAIT_MS.min, CHAT_LIST_SCROLL_WAIT_MS.max);
-  }
-  if (names.size === 0) throw new Error('会话列表为空，未读取到候选人。');
-  return [...names];
-}
 
 async function resetChatListScroll(page: Page): Promise<void> {
   await page.evaluate(`(() => {
