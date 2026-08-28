@@ -99,6 +99,7 @@ type BatchTask = {
   status: 'running' | 'completed' | 'failed' | 'cancelled';
   total: number;
   sent: number;
+  skipped: number;
   failed: number;
   processed: number;
   currentCandidate?: string;
@@ -107,7 +108,7 @@ type BatchTask = {
   cancelRequested?: boolean;
   results: Array<{
     candidateName: string;
-    status: 'sent' | 'failed';
+    status: 'sent' | 'skipped' | 'failed';
     message?: string;
     error?: string;
   }>;
@@ -261,7 +262,7 @@ async function runBatchSendMessages(
 
   const results: Array<{
     candidateName: string;
-    status: 'sent' | 'failed';
+    status: 'sent' | 'skipped' | 'failed';
     message?: string;
     error?: string;
   }> = [];
@@ -275,10 +276,11 @@ async function runBatchSendMessages(
     const actionKey = `message:${item.candidateName}:${messageHash}`;
     const reservation = await reserveAction(actionKey, messageHash);
     if (!reservation.acquired) {
-      results.push({ candidateName: item.candidateName, status: 'sent', message: '已存在持久化发送记录，跳过重复发送。' });
+      results.push({ candidateName: item.candidateName, status: 'skipped', message: '已存在持久化发送记录，跳过重复发送。' });
       if (task) {
         task.processed = results.length;
         task.sent = results.filter((entry) => entry.status === 'sent').length;
+        task.skipped = results.filter((entry) => entry.status === 'skipped').length;
         task.failed = results.filter((entry) => entry.status === 'failed').length;
         task.results = [...results];
       }
@@ -293,7 +295,7 @@ async function runBatchSendMessages(
       });
       const skipped = result.includes('跳过发送');
       await recordAction(actionKey, skipped ? 'skipped' : 'sent', messageHash);
-      results.push({ candidateName: item.candidateName, status: 'sent', message: result });
+      results.push({ candidateName: item.candidateName, status: skipped ? 'skipped' : 'sent', message: result });
     } catch (error) {
       await recordAction(actionKey, 'failed', messageHash, error instanceof Error ? error.message : String(error));
       results.push({
@@ -305,6 +307,7 @@ async function runBatchSendMessages(
     if (task) {
       task.processed = results.length;
       task.sent = results.filter((item) => item.status === 'sent').length;
+      task.skipped = results.filter((item) => item.status === 'skipped').length;
       task.failed = results.filter((item) => item.status === 'failed').length;
       task.results = [...results];
     }
@@ -314,6 +317,7 @@ async function runBatchSendMessages(
     {
       total: results.length,
       sent: results.filter((item) => item.status === 'sent').length,
+      skipped: results.filter((item) => item.status === 'skipped').length,
       failed: results.filter((item) => item.status === 'failed').length,
       results,
     },
@@ -336,6 +340,7 @@ async function runBatchSendMessagesWithLifecycle(
     status: 'running',
     total: messages.length,
     sent: 0,
+    skipped: 0,
     failed: 0,
     processed: 0,
     startedAt: nowIso(),
@@ -378,6 +383,7 @@ function startBatchSendMessages(messages: BatchMessage[], confirm: boolean): str
     status: 'running',
     total: messages.length,
     sent: 0,
+    skipped: 0,
     failed: 0,
     processed: 0,
     startedAt: nowIso(),
@@ -395,9 +401,10 @@ function startBatchSendMessages(messages: BatchMessage[], confirm: boolean): str
 
   void runBatchSendMessages(messages, true, task, controller.signal)
     .then((summary) => {
-      const parsed = JSON.parse(summary) as Pick<BatchTask, 'sent' | 'failed' | 'results'>;
+      const parsed = JSON.parse(summary) as Pick<BatchTask, 'sent' | 'skipped' | 'failed' | 'results'>;
       task.status = task.cancelRequested ? 'cancelled' : 'completed';
       task.sent = parsed.sent;
+      task.skipped = parsed.skipped;
       task.failed = parsed.failed;
       task.results = parsed.results;
       task.currentCandidate = undefined;
