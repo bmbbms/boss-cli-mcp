@@ -25,6 +25,7 @@ type ChatListEntry = { candidateId: string; name: string };
 
 async function collectAllChatEntries(page: Page): Promise<ChatListEntry[]> {
   const entries = new Map<string, ChatListEntry>();
+  const unresolved = new Set<string>();
   let stable = 0;
   let last = '';
   for (let i = 0; i < CHAT_LIST_SCROLL_MAX_ROUNDS; i += 1) {
@@ -39,7 +40,10 @@ async function collectAllChatEntries(page: Page): Promise<ChatListEntry[]> {
       return { visible, moved: root.scrollTop !== before, atEnd: root.scrollTop + root.clientHeight >= root.scrollHeight - 2, top: root.scrollTop, height: root.scrollHeight };
     })()`)) as { visible: ChatListEntry[]; moved: boolean; atEnd: boolean; top: number; height: number };
     const before = entries.size;
-    for (const entry of state.visible) if (entry.candidateId) entries.set(entry.candidateId, entry);
+    for (const entry of state.visible) {
+      if (entry.candidateId) entries.set(entry.candidateId, entry);
+      else unresolved.add(entry.name);
+    }
     const signature = `${entries.size}:${state.top}:${state.height}:${state.atEnd}`;
     stable = entries.size === before && signature === last ? stable + 1 : 0;
     last = signature;
@@ -48,6 +52,7 @@ async function collectAllChatEntries(page: Page): Promise<ChatListEntry[]> {
     await sleepRandom(CHAT_LIST_SCROLL_WAIT_MS.min, CHAT_LIST_SCROLL_WAIT_MS.max);
   }
   if (entries.size === 0) throw new Error('会话列表为空，未读取到带稳定 ID 的候选人。');
+  if (unresolved.size > 0) throw new Error(`有 ${unresolved.size} 条会话未找到稳定 candidateId，已拒绝按姓名降级处理。`);
   return [...entries.values()];
 }
 

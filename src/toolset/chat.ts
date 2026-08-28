@@ -926,6 +926,7 @@ export async function runOpenCandidateChatById(
       await sleepRandom(OPEN_CHAT_AFTER_ROW_CLICK_MS.min, OPEN_CHAT_AFTER_ROW_CLICK_MS.max);
       const expected = JSON.stringify(state.name || nameHint);
       await page.waitForFunction(`(() => {
+        const expectedId = ${idLiteral};
         const expected = ${expected};
         const norm = (v) => (v ?? '').replace(/\\s+/g, ' ').trim();
         const visible = (el) => { if (!el) return false; const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden'; };
@@ -933,7 +934,8 @@ export async function runOpenCandidateChatById(
         const detail = Array.from(document.querySelectorAll('.base-info-single-container')).find(visible);
         const selectedName = norm(selected?.querySelector('.geek-name')?.textContent);
         const detailName = norm(detail?.querySelector('.name-box')?.textContent);
-        return !!selected && !!detail && (!expected || (selectedName === expected && detailName === expected));
+        const selectedId = selected?.getAttribute('data-id') || selected?.id?.replace(/^_/, '');
+        return !!selected && !!detail && selectedId === expectedId && (!expected || (selectedName === expected && detailName === expected));
       })()`, { timeout: 20_000 });
       return state.name;
     }
