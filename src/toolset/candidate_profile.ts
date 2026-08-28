@@ -124,6 +124,15 @@ export type ActionRecord = {
 };
 type ActionState = Record<string, ActionRecord>;
 const stateFile = join(CACHE_DIR, 'candidate-actions.json');
+let ledgerLock: Promise<void> = Promise.resolve();
+
+async function withLedgerLock<T>(fn: () => Promise<T>): Promise<T> {
+  const previous = ledgerLock;
+  let release!: () => void;
+  ledgerLock = new Promise<void>((resolve) => { release = resolve; });
+  await previous;
+  try { return await fn(); } finally { release(); }
+}
 
 async function readState(): Promise<ActionState> {
   ensureAppDataLayout();
@@ -147,20 +156,17 @@ export async function getActionRecord(key: string): Promise<ActionRecord | undef
 }
 
 export async function reserveAction(key: string, messageHash: string): Promise<{ acquired: boolean; record?: ActionRecord }> {
-  const state = await readState();
-  const previous = state[key];
-  if (previous && (previous.status === 'sent' || previous.status === 'skipped') && previous.messageHash === messageHash) {
-    return { acquired: false, record: previous };
-  }
-  const record: ActionRecord = {
-    status: 'reserved',
-    messageHash,
-    attemptId: `${process.pid}-${Date.now()}`,
-    updatedAt: new Date().toISOString(),
-  };
-  state[key] = record;
-  await writeStateAtomically(state);
-  return { acquired: true, record };
+  return withLedgerLock(async () => {
+    const state = await readState();
+    const previous = state[key];
+    if (previous && previous.messageHash === messageHash && (previous.status === 'reserved' || previous.status === 'sent' || previous.status === 'skipped')) {
+      return { acquired: false, record: previous };
+    }
+    const record: ActionRecord = { status: 'reserved', messageHash, attemptId: `${process.pid}-${Date.now()}`, updatedAt: new Date().toISOString() };
+    state[key] = record;
+    await writeStateAtomically(state);
+    return { acquired: true, record };
+  });
 }
 
 async function writeStateAtomically(state: ActionState): Promise<void> {
@@ -170,9 +176,11 @@ async function writeStateAtomically(state: ActionState): Promise<void> {
 }
 
 export async function recordAction(key: string, status: ActionRecord['status'], messageHash?: string, error?: string): Promise<void> {
-  const state = await readState();
-  state[key] = { status, messageHash, error, updatedAt: new Date().toISOString() };
-  await writeStateAtomically(state);
+  await withLedgerLock(async () => {
+    const state = await readState();
+    state[key] = { status, messageHash, error, updatedAt: new Date().toISOString() };
+    await writeStateAtomically(state);
+  });
 }
 
 export function messageFingerprint(message: string): string {
