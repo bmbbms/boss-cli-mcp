@@ -1,4 +1,4 @@
-import { readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { CACHE_DIR, ensureAppDataLayout } from '../config.js';
 import { join } from 'node:path';
 
@@ -125,13 +125,28 @@ export type ActionRecord = {
 type ActionState = Record<string, ActionRecord>;
 const stateFile = join(CACHE_DIR, 'candidate-actions.json');
 let ledgerLock: Promise<void> = Promise.resolve();
+const ledgerLockDir = `${stateFile}.lock`;
+
+async function acquireProcessLedgerLock(): Promise<() => Promise<void>> {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    try {
+      await mkdir(ledgerLockDir);
+      return async () => { await rm(ledgerLockDir, { recursive: true, force: false }); };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  throw new Error(`获取批量动作账本锁超时：${ledgerLockDir}`);
+}
 
 async function withLedgerLock<T>(fn: () => Promise<T>): Promise<T> {
   const previous = ledgerLock;
   let release!: () => void;
   ledgerLock = new Promise<void>((resolve) => { release = resolve; });
   await previous;
-  try { return await fn(); } finally { release(); }
+  const releaseProcess = await acquireProcessLedgerLock();
+  try { return await fn(); } finally { await releaseProcess(); release(); }
 }
 
 async function readState(): Promise<ActionState> {
