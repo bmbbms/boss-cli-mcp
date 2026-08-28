@@ -17,6 +17,19 @@ export type SendChatMessageOptions = {
   signal?: AbortSignal;
 };
 
+async function hasExactOutgoingMessage(page: import('puppeteer-core').Page, message: string): Promise<boolean> {
+  const literal = JSON.stringify(message);
+  return (await page.evaluate(`((expected) => Array.from(document.querySelectorAll('.item-myself .text span')).some((el) => (el.textContent || '').replace(/\\s+/g, ' ').trim() === expected))`, message)) as boolean;
+}
+
+async function waitForExactOutgoingMessage(page: import('puppeteer-core').Page, message: string): Promise<void> {
+  await page.waitForFunction(
+    `((expected) => Array.from(document.querySelectorAll('.item-myself .text span')).some((el) => (el.textContent || '').replace(/\\s+/g, ' ').trim() === expected))`,
+    { timeout: 8_000 },
+    message,
+  );
+}
+
 export async function runSendChatMessageOnPage(
   page: import('puppeteer-core').Page,
   options: SendChatMessageOptions,
@@ -75,6 +88,23 @@ export async function runSendChatMessageOnPage(
     }
     throw new Error(`发送消息失败：${String(e)}`);
   }
+}
+
+export async function runOpenAndSendMessageIdempotent(
+  page: import('puppeteer-core').Page,
+  options: { text: string; signal?: AbortSignal },
+): Promise<{ status: 'sent' | 'skipped'; message: string }> {
+  const text = options.text.trim();
+  if (await hasExactOutgoingMessage(page, text)) {
+    return { status: 'skipped', message: `已检测到聊天记录中已有相同消息，跳过发送：${text}` };
+  }
+  const result = await runSendChatMessageOnPage(page, { text, signal: options.signal });
+  try {
+    await waitForExactOutgoingMessage(page, text);
+  } catch (error) {
+    throw new Error(`消息发送后未在聊天记录中确认，禁止自动重试：${error instanceof Error ? error.message : String(error)}`);
+  }
+  return { status: 'sent', message: result };
 }
 
 export async function runSendChatMessage(options: SendChatMessageOptions): Promise<string> {

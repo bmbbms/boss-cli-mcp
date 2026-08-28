@@ -1,4 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, rename, writeFile } from 'node:fs/promises';
 import { CACHE_DIR, ensureAppDataLayout } from '../config.js';
 import { join } from 'node:path';
 
@@ -115,7 +115,14 @@ export function matchCandidateProfile(profile: CandidateProfile, req: CandidateR
   return { matched: unknown.length === 0, reasons, unknown };
 }
 
-type ActionState = Record<string, { status: 'sent' | 'skipped' | 'failed'; messageHash?: string; updatedAt: string }>;
+export type ActionRecord = {
+  status: 'reserved' | 'sent' | 'skipped' | 'failed';
+  messageHash?: string;
+  updatedAt: string;
+  attemptId?: string;
+  error?: string;
+};
+type ActionState = Record<string, ActionRecord>;
 const stateFile = join(CACHE_DIR, 'candidate-actions.json');
 
 async function readState(): Promise<ActionState> {
@@ -134,10 +141,38 @@ export async function hasActionBeenRecorded(key: string, messageHash?: string): 
   return !!item && item.status === 'sent' && (!messageHash || item.messageHash === messageHash);
 }
 
-export async function recordAction(key: string, status: 'sent' | 'skipped' | 'failed', messageHash?: string): Promise<void> {
+export async function getActionRecord(key: string): Promise<ActionRecord | undefined> {
   const state = await readState();
-  state[key] = { status, messageHash, updatedAt: new Date().toISOString() };
-  await writeFile(stateFile, JSON.stringify(state, null, 2), 'utf8');
+  return state[key];
+}
+
+export async function reserveAction(key: string, messageHash: string): Promise<{ acquired: boolean; record?: ActionRecord }> {
+  const state = await readState();
+  const previous = state[key];
+  if (previous && (previous.status === 'sent' || previous.status === 'skipped') && previous.messageHash === messageHash) {
+    return { acquired: false, record: previous };
+  }
+  const record: ActionRecord = {
+    status: 'reserved',
+    messageHash,
+    attemptId: `${process.pid}-${Date.now()}`,
+    updatedAt: new Date().toISOString(),
+  };
+  state[key] = record;
+  await writeStateAtomically(state);
+  return { acquired: true, record };
+}
+
+async function writeStateAtomically(state: ActionState): Promise<void> {
+  const temp = `${stateFile}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(temp, JSON.stringify(state, null, 2), 'utf8');
+  await rename(temp, stateFile);
+}
+
+export async function recordAction(key: string, status: ActionRecord['status'], messageHash?: string, error?: string): Promise<void> {
+  const state = await readState();
+  state[key] = { status, messageHash, error, updatedAt: new Date().toISOString() };
+  await writeStateAtomically(state);
 }
 
 export function messageFingerprint(message: string): string {

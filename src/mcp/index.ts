@@ -28,6 +28,7 @@ import {
   runCandidateAutomation,
   type ChatPageAction,
 } from '../toolset/index.js';
+import { messageFingerprint, recordAction, reserveAction } from '../toolset/candidate_profile.js';
 import type { CandidateRequirements } from '../toolset/candidate_profile.js';
 import { getBrowserRef, getPageRef } from '../browser/browser_session.js';
 
@@ -270,6 +271,19 @@ async function runBatchSendMessages(
       throw signal.reason instanceof Error ? signal.reason : new Error('批量任务已取消。');
     }
     if (task) task.currentCandidate = item.candidateName;
+    const messageHash = messageFingerprint(item.text);
+    const actionKey = `message:${item.candidateName}:${messageHash}`;
+    const reservation = await reserveAction(actionKey, messageHash);
+    if (!reservation.acquired) {
+      results.push({ candidateName: item.candidateName, status: 'sent', message: '已存在持久化发送记录，跳过重复发送。' });
+      if (task) {
+        task.processed = results.length;
+        task.sent = results.filter((entry) => entry.status === 'sent').length;
+        task.failed = results.filter((entry) => entry.status === 'failed').length;
+        task.results = [...results];
+      }
+      continue;
+    }
     try {
       const result = await implOpenAndSendMessage({
         candidateName: item.candidateName,
@@ -277,8 +291,11 @@ async function runBatchSendMessages(
         exact: item.exact,
         signal,
       });
+      const skipped = result.includes('跳过发送');
+      await recordAction(actionKey, skipped ? 'skipped' : 'sent', messageHash);
       results.push({ candidateName: item.candidateName, status: 'sent', message: result });
     } catch (error) {
+      await recordAction(actionKey, 'failed', messageHash, error instanceof Error ? error.message : String(error));
       results.push({
         candidateName: item.candidateName,
         status: 'failed',

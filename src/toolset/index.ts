@@ -7,7 +7,7 @@ import {
   runChatActionOnCurrentConversation,
   type ChatPageAction,
 } from './action.js';
-import { runSendChatMessage, runSendChatMessageOnPage } from './send.js';
+import { runSendChatMessage, runSendChatMessageOnPage, runOpenAndSendMessageIdempotent } from './send.js';
 import { withBossSessionPage } from '../common/boss_session_page.js';
 import { runBossSearch, runBossSearchSet } from './deep-search.js';
 import { runNormalSearch } from './normal-search.js';
@@ -78,7 +78,8 @@ export async function implOpenAndSendMessage(params: {
 }): Promise<string> {
   return withBossSessionPage(async (page) => {
     await runOpenCandidateChat(page, params.candidateName, params.exact);
-    return runSendChatMessageOnPage(page, { text: params.text, signal: params.signal });
+    const result = await runOpenAndSendMessageIdempotent(page, { text: params.text, signal: params.signal });
+    return result.message;
   }, { retryOnContextDestroyed: false });
 }
 

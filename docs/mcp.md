@@ -108,7 +108,7 @@ Chrome 中完成登录。
 `boss_batch_send_status` 查询进度和 `sent` / `failed` 结果。设置 `waitForCompletion=true`
 可以改为等待全部发送完成，但页面首次加载较慢时可能超时。工具不会自动发送求简历操作。
 
-任务运行时会实时更新 `processed`、`sent`、`failed`、`currentCandidate` 和 `results`。
+任务运行时会实时更新 `processed`、`sent`、`failed`、`currentCandidate` 和 `results`。批量发送会为每个“候选人+消息指纹”写入 `~/.boss-cli/.cache/candidate-actions.json`：发送前先预占，打开会话后复核己方聊天记录，发送后必须再次确认消息已出现；未确认成功时不会自动重试，避免重复发送。
 单次最多发送 20 人。
 同一 MCP 进程同时只允许一个浏览器写操作任务，避免多个任务切换同一个聊天页面。
 任务默认最长运行 30 分钟，完成后的任务状态在内存中保留 1 小时；MCP 重启后旧的
