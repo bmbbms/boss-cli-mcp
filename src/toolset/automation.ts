@@ -34,11 +34,11 @@ async function collectAllChatNames(page: Page): Promise<string[]> {
       const norm = (v) => (v ?? '').replace(/\\s+/g, ' ').trim();
       const rows = Array.from(document.querySelectorAll('.geek-item-wrap'));
       const visibleNames = rows.map((row) => norm(row.querySelector('.geek-name')?.textContent)).filter(Boolean);
-      let node = rows[0]?.parentElement ?? null;
+      let node = document.querySelector('.user-list') || rows[0]?.parentElement || null;
       let scroller = null;
       while (node) {
         const style = window.getComputedStyle(node);
-        const canScroll = (style.overflowY === 'auto' || style.overflowY === 'scroll') && node.scrollHeight > node.clientHeight;
+        const canScroll = (style.overflowY === 'auto' || style.overflowY === 'scroll' || style.overflowY === 'hidden') && node.scrollHeight > node.clientHeight;
         if (canScroll) { scroller = node; break; }
         node = node.parentElement;
       }
@@ -78,10 +78,10 @@ async function collectAllChatNames(page: Page): Promise<string[]> {
 async function resetChatListScroll(page: Page): Promise<void> {
   await page.evaluate(`(() => {
     const row = document.querySelector('.geek-item-wrap');
-    let node = row?.parentElement ?? null;
+    let node = document.querySelector('.user-list') || row?.parentElement || null;
     while (node) {
       const style = window.getComputedStyle(node);
-      if ((style.overflowY === 'auto' || style.overflowY === 'scroll') && node.scrollHeight > node.clientHeight) {
+      if ((style.overflowY === 'auto' || style.overflowY === 'scroll' || style.overflowY === 'hidden') && node.scrollHeight > node.clientHeight) {
         node.scrollTop = 0;
         return;
       }
