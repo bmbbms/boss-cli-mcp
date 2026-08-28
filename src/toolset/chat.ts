@@ -885,3 +885,60 @@ export async function runOpenCandidateChat(
     throw new Error(`打开候选人聊天失败：${message}`);
   }
 }
+
+/** 按沟通列表行的稳定 data-id 打开会话；不会按姓名回退。 */
+export async function runOpenCandidateChatById(
+  page: Page,
+  candidateId: string,
+  expectedName?: string,
+): Promise<string> {
+  const id = candidateId.trim();
+  if (!id) throw new Error('候选人会话 ID 不能为空。');
+  const nameHint = (expectedName ?? '').trim();
+  const idLiteral = JSON.stringify(id);
+  const nameLiteral = JSON.stringify(nameHint);
+  for (let round = 0; round < 80; round += 1) {
+    const state = (await page.evaluate(`(() => {
+      const id = ${idLiteral};
+      const nameHint = ${nameLiteral};
+      const norm = (v) => (v ?? '').replace(/\\s+/g, ' ').trim();
+      const rows = Array.from(document.querySelectorAll('.geek-item-wrap'));
+      const wrap = rows.find((el) => {
+        const row = el.querySelector('.geek-item') || el;
+        return row.getAttribute('data-id') === id || row.id === '_' + id;
+      });
+      if (wrap) {
+        const row = wrap.querySelector('.geek-item') || wrap;
+        row.scrollIntoView({ block: 'center', inline: 'nearest' });
+        const r = row.getBoundingClientRect();
+        return { found: true, name: norm(wrap.querySelector('.geek-name')?.textContent), x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      }
+      const root = document.querySelector('.user-list');
+      if (root && root.scrollHeight > root.clientHeight) {
+        const before = root.scrollTop;
+        root.scrollTop = Math.min(before + Math.max(180, Math.floor(root.clientHeight * 0.82)), root.scrollHeight);
+        return { found: false, moved: root.scrollTop !== before, atEnd: root.scrollTop + root.clientHeight >= root.scrollHeight - 2, name: nameHint, x: 0, y: 0 };
+      }
+      return { found: false, moved: false, atEnd: true, name: nameHint, x: 0, y: 0 };
+    })()`)) as { found: boolean; moved: boolean; atEnd: boolean; name: string; x: number; y: number };
+    if (state.found) {
+      await page.mouse.click(state.x, state.y, { delay: 40 });
+      await sleepRandom(OPEN_CHAT_AFTER_ROW_CLICK_MS.min, OPEN_CHAT_AFTER_ROW_CLICK_MS.max);
+      const expected = JSON.stringify(state.name || nameHint);
+      await page.waitForFunction(`(() => {
+        const expected = ${expected};
+        const norm = (v) => (v ?? '').replace(/\\s+/g, ' ').trim();
+        const visible = (el) => { if (!el) return false; const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden'; };
+        const selected = Array.from(document.querySelectorAll('.geek-item.selected')).find(visible);
+        const detail = Array.from(document.querySelectorAll('.base-info-single-container')).find(visible);
+        const selectedName = norm(selected?.querySelector('.geek-name')?.textContent);
+        const detailName = norm(detail?.querySelector('.name-box')?.textContent);
+        return !!selected && !!detail && (!expected || (selectedName === expected && detailName === expected));
+      })()`, { timeout: 20_000 });
+      return state.name;
+    }
+    if (state.atEnd || !state.moved) break;
+    await sleepRandom(280, 520);
+  }
+  throw new Error(`未在沟通列表中找到候选人会话 ID：${id}${nameHint ? `（姓名提示：${nameHint}）` : ''}`);
+}

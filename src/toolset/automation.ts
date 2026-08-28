@@ -5,7 +5,7 @@ import { isBossChatIndexUrl } from '../common/auth.js';
 import { assertRecommendPageReady, clickGreet, readRecommendList } from './recommend.js';
 import { runChatActionOnCurrentConversation } from './action.js';
 import { runSendChatMessageOnPage } from './send.js';
-import { runOpenCandidateChat } from './chat.js';
+import { runOpenCandidateChat, runOpenCandidateChatById } from './chat.js';
 import { matchCandidateProfile, messageFingerprint, parseCandidateProfile, recordAction, hasActionBeenRecorded, type CandidateRequirements, type CandidateProfile } from './candidate_profile.js';
 
 export type AutomationOptions = {
@@ -21,6 +21,35 @@ export type AutomationOptions = {
 };
 
 type Result = { candidate: CandidateProfile; match: ReturnType<typeof matchCandidateProfile>; action: string };
+type ChatListEntry = { candidateId: string; name: string };
+
+async function collectAllChatEntries(page: Page): Promise<ChatListEntry[]> {
+  const entries = new Map<string, ChatListEntry>();
+  let stable = 0;
+  let last = '';
+  for (let i = 0; i < CHAT_LIST_SCROLL_MAX_ROUNDS; i += 1) {
+    const state = (await page.evaluate(`(() => {
+      const norm = (v) => (v ?? '').replace(/\\s+/g, ' ').trim();
+      const rows = Array.from(document.querySelectorAll('.geek-item-wrap'));
+      const visible = rows.map((wrap) => { const row = wrap.querySelector('.geek-item') || wrap; return { name: norm(wrap.querySelector('.geek-name')?.textContent), candidateId: row.getAttribute('data-id') || row.id.replace(/^_/, '') }; }).filter((x) => x.name);
+      const root = document.querySelector('.user-list');
+      if (!(root instanceof HTMLElement) || root.scrollHeight <= root.clientHeight) return { visible, moved: false, atEnd: true, top: 0, height: 0 };
+      const before = root.scrollTop;
+      root.scrollTop = Math.min(before + Math.max(180, Math.floor(root.clientHeight * 0.82)), root.scrollHeight);
+      return { visible, moved: root.scrollTop !== before, atEnd: root.scrollTop + root.clientHeight >= root.scrollHeight - 2, top: root.scrollTop, height: root.scrollHeight };
+    })()`)) as { visible: ChatListEntry[]; moved: boolean; atEnd: boolean; top: number; height: number };
+    const before = entries.size;
+    for (const entry of state.visible) if (entry.candidateId) entries.set(entry.candidateId, entry);
+    const signature = `${entries.size}:${state.top}:${state.height}:${state.atEnd}`;
+    stable = entries.size === before && signature === last ? stable + 1 : 0;
+    last = signature;
+    if (state.atEnd && stable >= 2) break;
+    if (!state.moved && state.atEnd) break;
+    await sleepRandom(CHAT_LIST_SCROLL_WAIT_MS.min, CHAT_LIST_SCROLL_WAIT_MS.max);
+  }
+  if (entries.size === 0) throw new Error('会话列表为空，未读取到带稳定 ID 的候选人。');
+  return [...entries.values()];
+}
 
 const CHAT_LIST_SCROLL_MAX_ROUNDS = 80;
 const CHAT_LIST_SCROLL_WAIT_MS = { min: 450, max: 850 } as const;
@@ -109,7 +138,7 @@ async function recommendProfiles(frame: Frame): Promise<CandidateProfile[]> {
   return rows.map((x) => parseCandidateProfile({ ...x, rawText: [x.name, x.salary, x.basicInfo, x.expect, x.experience].join(' / ') }));
 }
 
-async function chatProfile(page: Page): Promise<CandidateProfile> {
+async function chatProfile(page: Page, candidateId?: string): Promise<CandidateProfile> {
   const data = await page.evaluate(`(() => {
     const root = document.querySelector('.base-info-single-container');
     const norm = (v) => (v ?? '').replace(/\\s+/g, ' ').trim();
@@ -121,7 +150,7 @@ async function chatProfile(page: Page): Promise<CandidateProfile> {
     const rawText = [name, basicInfo, position, expectation, root.innerText].filter(Boolean).join(' / ');
     return { name, basicInfo, expect: expectation, rawText };
   })()`) as { name: string; basicInfo: string; expect: string; rawText: string };
-  return parseCandidateProfile(data);
+  return parseCandidateProfile({ ...data, geekId: candidateId });
 }
 
 export async function runCandidateAutomation(options: AutomationOptions): Promise<string> {
@@ -148,22 +177,22 @@ export async function runCandidateAutomation(options: AutomationOptions): Promis
       }
     } else {
       if (!isBossChatIndexUrl(page.url())) throw new Error('当前不在沟通列表页。');
-      const names = options.scope === 'chat-list' ? await collectAllChatNames(page) : [];
+      const entries = options.scope === 'chat-list' ? await collectAllChatEntries(page) : [];
       if (options.scope === 'chat-list') await resetChatListScroll(page);
-      const targets = options.scope === 'chat-list' ? (names as string[]) : [''];
+      const targets = options.scope === 'chat-list' ? entries : [{ candidateId: '', name: '' }];
       let matchedCount = 0;
       let failedCount = 0;
       options.onProgress?.({ phase: 'collected', total: targets.length, processed: 0, matched: 0, failed: 0 });
       for (let i = 0; i < targets.length; i += 1) {
         const target = targets[i]!;
         try {
-          if (target) await runOpenCandidateChat(page, target, true);
-          const profile = await chatProfile(page);
+          if (target.candidateId) await runOpenCandidateChatById(page, target.candidateId, target.name);
+          const profile = await chatProfile(page, target.candidateId || undefined);
           const match = matchCandidateProfile(profile, req);
           let action = match.matched ? '符合条件' : '不符合条件';
           if (match.matched) matchedCount += 1;
           if (execute) {
-          const key = `message:${profile.name}`;
+          const key = `message:${profile.geekId || target.candidateId || profile.name}`;
           const hash = messageFingerprint(message);
           if (match.matched) {
             if (await hasActionBeenRecorded(key, hash)) action = '已发送过，跳过';
@@ -186,10 +215,10 @@ export async function runCandidateAutomation(options: AutomationOptions): Promis
           results.push({ candidate: profile, match, action });
         } catch (error) {
           failedCount += 1;
-          const candidate = parseCandidateProfile({ name: target, rawText: target });
+          const candidate = parseCandidateProfile({ name: target.name, rawText: target.name, geekId: target.candidateId });
           results.push({ candidate, match: { matched: false, reasons: [], unknown: ['读取失败'] }, action: `失败：${error instanceof Error ? error.message : String(error)}` });
         }
-        options.onProgress?.({ phase: 'processing', total: targets.length, processed: i + 1, currentCandidate: target, matched: matchedCount, failed: failedCount });
+        options.onProgress?.({ phase: 'processing', total: targets.length, processed: i + 1, currentCandidate: target.name, matched: matchedCount, failed: failedCount });
         if ((i + 1) % batchSize === 0 && i + 1 < targets.length) await sleepRandom(180, 360);
       }
     }
