@@ -72,6 +72,28 @@ mcpLog('startup', {
   entrypoint: process.argv[1] ?? null,
 });
 
+const transport = new StdioServerTransport();
+
+process.on('uncaughtException', (error) => {
+  mcpLog('uncaught_exception', { error: error instanceof Error ? error.stack || error.message : String(error) });
+  process.exitCode = 1;
+});
+process.on('unhandledRejection', (reason) => {
+  mcpLog('unhandled_rejection', { error: reason instanceof Error ? reason.stack || reason.message : String(reason) });
+  process.exitCode = 1;
+});
+process.on('SIGTERM', () => {
+  mcpLog('signal', { signal: 'SIGTERM' });
+  process.exitCode = 143;
+  void transport?.close?.();
+});
+process.on('SIGINT', () => {
+  mcpLog('signal', { signal: 'SIGINT' });
+  process.exitCode = 130;
+  void transport?.close?.();
+});
+process.on('exit', (code) => mcpLog('exit', { code }));
+
 function textResult(text: string) {
   const trimmed = text.trimEnd();
   try {
@@ -796,5 +818,6 @@ server.registerTool(
   async ({ apiKey, secretKey }) => textResult(await implSetBaiduCredentials(apiKey, secretKey)),
 );
 
-const transport = new StdioServerTransport();
+transport.onerror = (error) => mcpLog('transport_error', { error: error.stack || error.message });
+transport.onclose = () => mcpLog('transport_close');
 await server.connect(transport);

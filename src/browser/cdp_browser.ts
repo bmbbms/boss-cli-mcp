@@ -1,7 +1,9 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import readline from 'node:readline';
 import path from 'node:path';
+import { join } from 'node:path';
 import puppeteer, { type Browser, type CDPSession, type Page } from 'puppeteer-core';
 import { BROWSER_USER_DATA_DIR, ensureAppDataLayout } from '../config.js';
 
@@ -25,6 +27,40 @@ export const REMOTE_DEBUGGING_PORT: number = (() => {
 })();
 
 let spawnedChromeChild: ChildProcess | null = null;
+
+async function processExists(pid: number): Promise<boolean> {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'EPERM');
+  }
+}
+
+async function acquireCdpStartLock(lockDir: string): Promise<() => Promise<void>> {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    try {
+      await mkdir(lockDir);
+      await writeFile(join(lockDir, 'owner.json'), JSON.stringify({ pid: process.pid, createdAt: Date.now() }), 'utf8');
+      return async () => { await rm(lockDir, { recursive: true, force: false }); };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      try {
+        const owner = JSON.parse(await readFile(join(lockDir, 'owner.json'), 'utf8')) as { pid?: number; createdAt?: number };
+        const stale = !Number.isInteger(owner.pid) || !(await processExists(owner.pid!));
+        if (stale) await rm(lockDir, { recursive: true, force: true });
+      } catch (ownerError) {
+        if ((ownerError as NodeJS.ErrnoException).code !== 'ENOENT') {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const retryWsUrl = await probeRemoteDebuggingWsEndpoint(REMOTE_DEBUGGING_PORT, 800);
+      if (retryWsUrl) return async () => {};
+    }
+  }
+  throw new Error(`等待 Chrome 启动锁超时：${lockDir}`);
+}
 /** 最近一次 `connectBrowser` 是否以无头方式启动（`browser.process()` 在 connect 模式下不可用，供 login 等逻辑判断）。 */
 let lastChromeLaunchHeadless = false;
 
@@ -259,6 +295,7 @@ export async function connectBrowser(options: ConnectBrowserOptions = {}): Promi
   }
   const userDataDir =
     options.userDataDir?.trim() || envUserData || BROWSER_USER_DATA_DIR;
+  const cdpStartLockDir = `${userDataDir}.cdp-start.lock`;
 
   const profileDirectory =
     options.profileDirectory?.trim() || process.env.BOSS_BROWSER_PROFILE_DIRECTORY?.trim();
@@ -284,6 +321,18 @@ export async function connectBrowser(options: ConnectBrowserOptions = {}): Promi
   if (existingWsUrl) {
     return await puppeteer.connect({
       browserWSEndpoint: existingWsUrl,
+      defaultViewport: launchViewportFromEnv(),
+    });
+  }
+
+  const releaseStartLock = await acquireCdpStartLock(cdpStartLockDir);
+
+  // 可能已有另一个 MCP 进程在本进程等待锁期间完成 Chrome 启动；持锁后必须再次探测。
+  const lockedExistingWsUrl = await probeRemoteDebuggingWsEndpoint(REMOTE_DEBUGGING_PORT, 800);
+  if (lockedExistingWsUrl) {
+    await releaseStartLock();
+    return await puppeteer.connect({
+      browserWSEndpoint: lockedExistingWsUrl,
       defaultViewport: launchViewportFromEnv(),
     });
   }
@@ -336,6 +385,8 @@ export async function connectBrowser(options: ConnectBrowserOptions = {}): Promi
     }
     clearSpawnedChromeProcessRef();
     throw e;
+  } finally {
+    await releaseStartLock();
   }
 
   try {
