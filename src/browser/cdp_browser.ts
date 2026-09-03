@@ -37,12 +37,24 @@ async function processExists(pid: number): Promise<boolean> {
   }
 }
 
-async function acquireCdpStartLock(lockDir: string): Promise<() => Promise<void>> {
+type CdpStartLock =
+  | { acquired: true; release: () => Promise<void> }
+  | { acquired: false; existingWsUrl: string };
+
+async function acquireCdpStartLock(lockDir: string): Promise<CdpStartLock> {
   for (let attempt = 0; attempt < 120; attempt += 1) {
     try {
       await mkdir(lockDir);
-      await writeFile(join(lockDir, 'owner.json'), JSON.stringify({ pid: process.pid, createdAt: Date.now() }), 'utf8');
-      return async () => { await rm(lockDir, { recursive: true, force: false }); };
+      try {
+        await writeFile(join(lockDir, 'owner.json'), JSON.stringify({ pid: process.pid, createdAt: Date.now() }), 'utf8');
+      } catch (error) {
+        await rm(lockDir, { recursive: true, force: true });
+        throw error;
+      }
+      return {
+        acquired: true,
+        release: async () => { await rm(lockDir, { recursive: true, force: false }); },
+      };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       try {
@@ -56,7 +68,12 @@ async function acquireCdpStartLock(lockDir: string): Promise<() => Promise<void>
       }
       await new Promise((resolve) => setTimeout(resolve, 50));
       const retryWsUrl = await probeRemoteDebuggingWsEndpoint(REMOTE_DEBUGGING_PORT, 800);
-      if (retryWsUrl) return async () => {};
+      if (retryWsUrl) {
+        return {
+          acquired: false,
+          existingWsUrl: retryWsUrl,
+        };
+      }
     }
   }
   throw new Error(`等待 Chrome 启动锁超时：${lockDir}`);
@@ -325,7 +342,17 @@ export async function connectBrowser(options: ConnectBrowserOptions = {}): Promi
     });
   }
 
-  const releaseStartLock = await acquireCdpStartLock(cdpStartLockDir);
+  const startLock = await acquireCdpStartLock(cdpStartLockDir);
+
+  // 等待其他进程启动期间已发现可用 CDP 时，本进程不拥有启动锁，绝不能 spawn 新 Chrome。
+  if (!startLock.acquired) {
+    return await puppeteer.connect({
+      browserWSEndpoint: startLock.existingWsUrl,
+      defaultViewport: launchViewportFromEnv(),
+    });
+  }
+
+  const releaseStartLock = startLock.release;
 
   // 可能已有另一个 MCP 进程在本进程等待锁期间完成 Chrome 启动；持锁后必须再次探测。
   const lockedExistingWsUrl = await probeRemoteDebuggingWsEndpoint(REMOTE_DEBUGGING_PORT, 800);

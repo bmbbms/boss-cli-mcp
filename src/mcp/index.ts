@@ -54,18 +54,35 @@ const MCP_LOG_FILE = join(MCP_LOG_DIR, 'mcp.log');
 
 mkdirSync(MCP_LOG_DIR, { recursive: true });
 
-function mcpLog(event: string, fields: Record<string, unknown> = {}): void {
-  const line = `${JSON.stringify({
-    ts: new Date().toISOString(),
-    event,
-    pid: process.pid,
-    ...fields,
-  })}\n`;
+type McpLogLevel = 'INFO' | 'WARN' | 'ERROR';
+
+function formatLocalTimestamp(value: Date): string {
+  const pad = (part: number) => String(part).padStart(2, '0');
+  return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())} ${pad(value.getHours())}:${pad(value.getMinutes())}:${pad(value.getSeconds())}`;
+}
+
+function formatLogValue(value: unknown): string {
+  if (value === undefined) return '-';
+  if (value === null) return 'null';
+  if (typeof value === 'string') {
+    return /^[A-Za-z0-9._:/=-]+$/.test(value) ? value : JSON.stringify(value);
+  }
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return String(value);
+  }
+  return JSON.stringify(value);
+}
+
+function mcpLog(level: McpLogLevel, event: string, fields: Record<string, unknown> = {}): void {
+  const context = Object.entries({ pid: process.pid, ...fields })
+    .map(([key, value]) => `${key}=${formatLogValue(value)}`)
+    .join(' ');
+  const line = `${formatLocalTimestamp(new Date())} [${level}] ${event}${context ? ` ${context}` : ''}\n`;
   appendFileSync(MCP_LOG_FILE, line, { encoding: 'utf8' });
   process.stderr.write(line);
 }
 
-mcpLog('startup', {
+mcpLog('INFO', 'startup', {
   version: MCP_VERSION,
   node: process.version,
   cwd: process.cwd(),
@@ -75,24 +92,24 @@ mcpLog('startup', {
 const transport = new StdioServerTransport();
 
 process.on('uncaughtException', (error) => {
-  mcpLog('uncaught_exception', { error: error instanceof Error ? error.stack || error.message : String(error) });
+  mcpLog('ERROR', 'uncaught_exception', { error: error instanceof Error ? error.stack || error.message : String(error) });
   process.exitCode = 1;
 });
 process.on('unhandledRejection', (reason) => {
-  mcpLog('unhandled_rejection', { error: reason instanceof Error ? reason.stack || reason.message : String(reason) });
+  mcpLog('ERROR', 'unhandled_rejection', { error: reason instanceof Error ? reason.stack || reason.message : String(reason) });
   process.exitCode = 1;
 });
 process.on('SIGTERM', () => {
-  mcpLog('signal', { signal: 'SIGTERM' });
+  mcpLog('WARN', 'signal', { signal: 'SIGTERM' });
   process.exitCode = 143;
   void transport?.close?.();
 });
 process.on('SIGINT', () => {
-  mcpLog('signal', { signal: 'SIGINT' });
+  mcpLog('WARN', 'signal', { signal: 'SIGINT' });
   process.exitCode = 130;
   void transport?.close?.();
 });
-process.on('exit', (code) => mcpLog('exit', { code }));
+process.on('exit', (code) => mcpLog('INFO', 'exit', { code }));
 
 function textResult(text: string) {
   const trimmed = text.trimEnd();
@@ -215,7 +232,7 @@ function startAsyncBrowserTask(
   asyncBrowserTasks.set(taskId, task);
   taskControllers.set(taskId, controller);
   activeBrowserTaskId = taskId;
-  mcpLog('task_started', { taskId, operation });
+  mcpLog('INFO', 'task_started', { taskId, operation });
   const timeout = setTimeout(() => {
     task.cancelRequested = true;
     controller.abort(new Error(`异步任务超过 ${TASK_TIMEOUT_MS / 1000}s，已请求停止。`));
@@ -231,14 +248,14 @@ function startAsyncBrowserTask(
         task.result = result;
       }
       task.completedAt = nowIso();
-      mcpLog('task_finished', { taskId, operation, status: task.status });
+      mcpLog('INFO', 'task_finished', { taskId, operation, status: task.status });
     })
     .catch((error) => {
       clearTimeout(timeout);
       task.status = task.cancelRequested ? 'cancelled' : 'failed';
       task.error = error instanceof Error ? error.message : String(error);
       task.completedAt = nowIso();
-      mcpLog('task_finished', { taskId, operation, status: task.status, error: task.error });
+      mcpLog('ERROR', 'task_finished', { taskId, operation, status: task.status, error: task.error });
     })
     .finally(() => {
       taskControllers.delete(taskId);
@@ -369,14 +386,14 @@ async function runBatchSendMessagesWithLifecycle(
     results: [],
   };
   activeBrowserTaskId = taskId;
-  mcpLog('task_started', { taskId, operation: 'batch_send', total: messages.length, waitForCompletion: true });
+  mcpLog('INFO', 'task_started', { taskId, operation: 'batch_send', total: messages.length, waitForCompletion: true });
   const timeout = setTimeout(() => controller.abort(new Error(`批量任务超过 ${TASK_TIMEOUT_MS / 1000}s。`)), TASK_TIMEOUT_MS);
   let taskStatus: 'completed' | 'failed' = 'completed';
   try {
     return await runBatchSendMessages(messages, confirm, task, controller.signal);
   } catch (error) {
     taskStatus = 'failed';
-    mcpLog('task_failed', {
+    mcpLog('ERROR', 'task_failed', {
       taskId,
       operation: 'batch_send',
       waitForCompletion: true,
@@ -386,7 +403,7 @@ async function runBatchSendMessagesWithLifecycle(
   } finally {
     clearTimeout(timeout);
     activeBrowserTaskId = null;
-    mcpLog('task_finished', { taskId, operation: 'batch_send', status: taskStatus, waitForCompletion: true });
+    mcpLog(taskStatus === 'completed' ? 'INFO' : 'ERROR', 'task_finished', { taskId, operation: 'batch_send', status: taskStatus, waitForCompletion: true });
   }
 }
 
@@ -415,7 +432,7 @@ function startBatchSendMessages(messages: BatchMessage[], confirm: boolean): str
   taskControllers.set(taskId, controller);
   activeBatchTaskId = taskId;
   activeBrowserTaskId = taskId;
-  mcpLog('task_started', { taskId, operation: 'batch_send', total: messages.length, waitForCompletion: false });
+  mcpLog('INFO', 'task_started', { taskId, operation: 'batch_send', total: messages.length, waitForCompletion: false });
   const timeout = setTimeout(() => {
     task.cancelRequested = true;
     controller.abort(new Error(`批量任务超过 ${TASK_TIMEOUT_MS / 1000}s，已请求停止。`));
@@ -433,13 +450,13 @@ function startBatchSendMessages(messages: BatchMessage[], confirm: boolean): str
       task.processed = messages.length;
       task.completedAt = nowIso();
       if (task.cancelRequested) task.error = '批量任务已取消或超时。';
-      mcpLog('task_finished', { taskId, operation: 'batch_send', status: task.status, sent: task.sent, failed: task.failed });
+      mcpLog('INFO', 'task_finished', { taskId, operation: 'batch_send', status: task.status, sent: task.sent, failed: task.failed });
     })
     .catch((error) => {
     task.status = task.cancelRequested ? 'cancelled' : 'failed';
       task.error = error instanceof Error ? error.message : String(error);
       task.completedAt = nowIso();
-      mcpLog('task_finished', { taskId, operation: 'batch_send', status: task.status, error: task.error });
+      mcpLog('ERROR', 'task_finished', { taskId, operation: 'batch_send', status: task.status, error: task.error });
     })
     .finally(() => {
       clearTimeout(timeout);
@@ -818,6 +835,6 @@ server.registerTool(
   async ({ apiKey, secretKey }) => textResult(await implSetBaiduCredentials(apiKey, secretKey)),
 );
 
-transport.onerror = (error) => mcpLog('transport_error', { error: error.stack || error.message });
-transport.onclose = () => mcpLog('transport_close');
+transport.onerror = (error) => mcpLog('ERROR', 'transport_error', { error: error.stack || error.message });
+transport.onclose = () => mcpLog('INFO', 'transport_close');
 await server.connect(transport);
