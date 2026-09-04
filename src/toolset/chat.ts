@@ -7,7 +7,7 @@ import {
   sleepRandom,
 } from '../browser/index.js';
 import { isBossChatIndexUrl } from '../common/auth.js';
-import { ensureChatListReady } from './list.js';
+import { collectAllChatItems, ensureChatListReady } from './list.js';
 
 type ChatFrom = 'friend' | 'myself' | 'system' | 'unknown';
 
@@ -505,52 +505,21 @@ export async function runOpenCandidateChatByIndex(
   if (!isBossChatIndexUrl(page.url())) {
     throw new Error('当前不在沟通列表页（/web/chat/index），无法打开候选人聊天。');
   }
-
-  const rowInfo = (await page.evaluate(`((rowIndex) => {
-    const norm = (v) => (v ?? "").replace(/\\s+/g, " ").trim();
-    const wraps = Array.from(document.querySelectorAll(".geek-item-wrap"));
-    const total = wraps.length;
-    const wrap = wraps[rowIndex - 1];
-    if (!wrap) return { total, name: "", job: "", message: "", time: "", x: 0, y: 0 };
-    const row = wrap.querySelector(".geek-item") || wrap;
-    row.scrollIntoView({ behavior: "instant", block: "center", inline: "nearest" });
-    const rect = row.getBoundingClientRect();
-    return {
-      total,
-      name: norm(wrap.querySelector(".geek-name")?.textContent),
-      job: norm(wrap.querySelector(".source-job")?.textContent),
-      message: norm(wrap.querySelector(".push-text")?.textContent),
-      time: norm(wrap.querySelector(".time")?.textContent),
-      x: rect.left + rect.width / 2,
-      y: rect.top + rect.height / 2,
-    };
-  })(${JSON.stringify(params.index)})`)) as {
-    total: number;
-    name: string;
-    job: string;
-    message: string;
-    time: string;
-    x: number;
-    y: number;
-  };
-
-  if (!rowInfo.name) {
-    throw new Error(
-      `聊天列表序号 ${params.index} 不存在；当前${filter === 'unread' ? '未读' : '全部'}列表共 ${rowInfo.total} 条。`,
-    );
+  const items = await collectAllChatItems(page);
+  const target = items[params.index - 1];
+  if (!target) {
+    throw new Error(`聊天列表序号 ${params.index} 不存在；当前${filter === 'unread' ? '未读' : '全部'}列表共 ${items.length} 条。`);
   }
   if (expectedName) {
-    const matched = exact ? rowInfo.name === expectedName : rowInfo.name.includes(expectedName);
+    const matched = exact ? target.name === expectedName : target.name.includes(expectedName);
     if (!matched) {
       throw new Error(
-        `聊天列表序号 ${params.index} 的候选人是「${rowInfo.name}」，与指定姓名「${expectedName}」不匹配。`,
+        `聊天列表序号 ${params.index} 的候选人是「${target.name}」，与指定姓名「${expectedName}」不匹配。`,
       );
     }
   }
-
-  await page.mouse.click(rowInfo.x, rowInfo.y, { delay: 40 });
-  await sleepRandom(OPEN_CHAT_AFTER_ROW_CLICK_MS.min, OPEN_CHAT_AFTER_ROW_CLICK_MS.max);
-  return renderOpenedCandidateChat(page, rowInfo.name);
+  const openedName = await runOpenCandidateChatById(page, target.candidateId, target.name);
+  return renderOpenedCandidateChat(page, openedName);
 }
 
 export async function runOpenCandidateChat(
@@ -891,6 +860,7 @@ export async function runOpenCandidateChatById(
   page: Page,
   candidateId: string,
   expectedName?: string,
+  signal?: AbortSignal,
 ): Promise<string> {
   const id = candidateId.trim();
   if (!id) throw new Error('候选人会话 ID 不能为空。');
@@ -898,6 +868,7 @@ export async function runOpenCandidateChatById(
   const idLiteral = JSON.stringify(id);
   const nameLiteral = JSON.stringify(nameHint);
   for (let round = 0; round < 80; round += 1) {
+    if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('任务已取消。');
     const state = (await page.evaluate(`(() => {
       const id = ${idLiteral};
       const nameHint = ${nameLiteral};
@@ -913,11 +884,21 @@ export async function runOpenCandidateChatById(
         const r = row.getBoundingClientRect();
         return { found: true, name: norm(wrap.querySelector('.geek-name')?.textContent), x: r.left + r.width / 2, y: r.top + r.height / 2 };
       }
-      const root = document.querySelector('.user-list');
-      if (root && root.scrollHeight > root.clientHeight) {
-        const before = root.scrollTop;
-        root.scrollTop = Math.min(before + Math.max(180, Math.floor(root.clientHeight * 0.82)), root.scrollHeight);
-        return { found: false, moved: root.scrollTop !== before, atEnd: root.scrollTop + root.clientHeight >= root.scrollHeight - 2, name: nameHint, x: 0, y: 0 };
+      let scroller = null;
+      let node = rows[0]?.parentElement || document.querySelector('.user-list');
+      while (node) {
+        const style = window.getComputedStyle(node);
+        if ((style.overflowY === 'auto' || style.overflowY === 'scroll' || style.overflowY === 'hidden') && node.scrollHeight > node.clientHeight) {
+          scroller = node;
+          break;
+        }
+        node = node.parentElement;
+      }
+      if (!scroller) scroller = document.scrollingElement;
+      if (scroller) {
+        const before = scroller.scrollTop;
+        scroller.scrollTop = Math.min(before + Math.max(180, Math.floor(scroller.clientHeight * 0.82)), scroller.scrollHeight);
+        return { found: false, moved: scroller.scrollTop !== before, atEnd: scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2, name: nameHint, x: 0, y: 0 };
       }
       return { found: false, moved: false, atEnd: true, name: nameHint, x: 0, y: 0 };
     })()`)) as { found: boolean; moved: boolean; atEnd: boolean; name: string; x: number; y: number };
@@ -940,7 +921,7 @@ export async function runOpenCandidateChatById(
       return state.name;
     }
     if (state.atEnd || !state.moved) break;
-    await sleepRandom(280, 520);
+    await sleepRandom(280, 520, signal);
   }
   throw new Error(`未在沟通列表中找到候选人会话 ID：${id}${nameHint ? `（姓名提示：${nameHint}）` : ''}`);
 }

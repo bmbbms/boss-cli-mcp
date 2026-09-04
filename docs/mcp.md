@@ -85,11 +85,13 @@ Chrome 中完成登录。
 {
   "messages": [
     {
+      "candidateId": "123456789-0",
       "candidateName": "张三",
       "text": "您好，感谢您的关注，请问方便补充一下简历吗？",
       "exact": true
     },
     {
+      "candidateId": "987654321-0",
       "candidateName": "李四",
       "text": "您好，感谢您的关注，请问方便补充一下简历吗？",
       "exact": true
@@ -103,7 +105,7 @@ Chrome 中完成登录。
 如需先检查名单和确认摘要而不产生任何浏览器操作，可设置 `dryRun: true`；正式发送时
 必须设置 `confirm: true`，并传入返回结果中的 `confirmationText`。
 
-建议先调用 `boss_list_candidates` 获取候选人姓名，确认列表无误后再调用批量工具。
+建议先调用 `boss_list_candidates` 获取候选人 `candidateId` 和姓名，确认列表无误后再调用批量工具；批量工具只按稳定 `candidateId` 定位，不按姓名回退。
 批量工具默认异步启动，立即返回 `taskId`，避免首次加载页面时触发 MCP 超时；随后使用
 `boss_batch_send_status` 查询进度和 `sent` / `failed` 结果。设置 `waitForCompletion=true`
 可以改为等待全部发送完成，但页面首次加载较慢时可能超时。工具不会自动发送求简历操作。

@@ -1,8 +1,9 @@
 /** 业务实现聚合出口：impl* 供 CLI 与其它模块调用 */
 import { runLogin } from './login.js';
 import { runGetCandidateList } from './list.js';
+import { ensureChatListReady } from './list.js';
 import { runListOpenPositions } from './jd.js';
-import { runOpenCandidateChat, runOpenCandidateChatByIndex } from './chat.js';
+import { runOpenCandidateChat, runOpenCandidateChatById, runOpenCandidateChatByIndex } from './chat.js';
 import {
   runChatActionOnCurrentConversation,
   type ChatPageAction,
@@ -71,13 +72,15 @@ export async function implSendMessage(params: {
 }
 
 export async function implOpenAndSendMessage(params: {
+  candidateId: string;
   candidateName: string;
   text: string;
   exact: boolean;
   signal?: AbortSignal;
 }): Promise<string> {
   return withBossSessionPage(async (page) => {
-    await runOpenCandidateChat(page, params.candidateName, params.exact);
+    await ensureChatListReady(page);
+    await runOpenCandidateChatById(page, params.candidateId, params.candidateName, params.signal);
     const result = await runOpenAndSendMessageIdempotent(page, { text: params.text, signal: params.signal });
     return result.message;
   }, { retryOnContextDestroyed: false });

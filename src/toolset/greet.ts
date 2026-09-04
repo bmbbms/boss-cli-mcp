@@ -29,6 +29,7 @@ import {
   selectRecommendJob,
 } from './recommend.js';
 import type { Page } from 'puppeteer-core';
+import { recordAction, reserveAction } from './candidate_profile.js';
 
 /** 打招呼前临时拉高父页视口，使 iframe 内更多卡片进入 DOM（与 recommend 列表读取已解耦）。 */
 const RECOMMEND_GREET_EXPAND_HEIGHT_PX = 3000;
@@ -85,8 +86,21 @@ export async function runRecommendGreet(options: GreetOptions): Promise<string> 
           await ensureInDeepSearchPage(page);
           jobLine = `当前岗位：${label}`;
         }
-        const greetResult = await clickGreetDeepSearch(page, t, signal);
-        await assertNoGreetPaywallPopup(page);
+        const deepCandidates = await readDeepSearchGeekList(page);
+        const deepTarget = deepCandidates.find((x) => x.name === t || x.name.includes(t));
+        if (!deepTarget?.geekId) throw new Error(`候选人「${t}」缺少稳定 geekId，拒绝执行打招呼。`);
+        const actionKey = `greet:${deepTarget.geekId}`;
+        const reservation = await reserveAction(actionKey, 'greet');
+        if (!reservation.acquired) throw new Error(`候选人「${t}」已打过招呼或正在由其他任务处理。`);
+        let greetResult;
+        try {
+          greetResult = await clickGreetDeepSearch(page, t, signal);
+          await assertNoGreetPaywallPopup(page);
+          await recordAction(actionKey, 'sent', 'greet');
+        } catch (error) {
+          await recordAction(actionKey, 'failed', 'greet', error instanceof Error ? error.message : String(error));
+          throw error;
+        }
         await sleepRandom(380, 1000, signal);
         const after = await readDeepSearchGeekList(page);
         await cleanupGreetModalIfPresent(page);
@@ -111,8 +125,20 @@ export async function runRecommendGreet(options: GreetOptions): Promise<string> 
         );
         throwIfAborted(signal);
         const before = await readRecommendList(frame);
-        const greetResult = await clickGreet(frame, t, signal);
-        await assertNoGreetPaywallPopup(page);
+        const target = before.find((x) => x.name === t || x.name.includes(t));
+        if (!target?.geekId) throw new Error(`候选人「${t}」缺少稳定 geekId，拒绝执行打招呼。`);
+        const actionKey = `greet:${target.geekId}`;
+        const reservation = await reserveAction(actionKey, 'greet');
+        if (!reservation.acquired) throw new Error(`候选人「${t}」已打过招呼或正在由其他任务处理。`);
+        let greetResult;
+        try {
+          greetResult = await clickGreet(frame, t, signal);
+          await assertNoGreetPaywallPopup(page);
+          await recordAction(actionKey, 'sent', 'greet');
+        } catch (error) {
+          await recordAction(actionKey, 'failed', 'greet', error instanceof Error ? error.message : String(error));
+          throw error;
+        }
         await sleepRandom(380, 1000, signal);
         const after = await readRecommendList(frame);
         markGreetProduced(before, after);

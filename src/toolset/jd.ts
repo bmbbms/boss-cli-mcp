@@ -438,7 +438,8 @@ export async function runListOpenPositions(
         await sleepRandom(settleMin, settleMax);
       }
       if (!isBossChatJobListUrl(page.url())) {
-        throw new Error('通过侧边栏“职位管理”进入职位页失败，请确认已登录并可访问 /web/chat/job/list。');
+        const menus = await page.evaluate(`(() => Array.from(document.querySelectorAll('.menu-list a')).map((a) => (a.textContent || '').replace(/\\s+/g, ' ').trim()).filter(Boolean).join('｜'))()`);
+        throw new Error(`通过侧边栏“职位管理”进入职位页失败：当前 URL=${page.url()}；目标=/web/chat/job/list；可见菜单=${menus || '空'}。`);
       }
       const ready = await waitForJobRowsReady(page, 16_000);
       await sleepRandom(350, 920);

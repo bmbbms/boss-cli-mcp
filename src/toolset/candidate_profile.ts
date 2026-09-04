@@ -140,6 +140,16 @@ async function acquireProcessLedgerLock(): Promise<() => Promise<void>> {
   throw new Error(`获取批量动作账本锁超时：${ledgerLockDir}`);
 }
 
+async function processExists(pid: number): Promise<boolean> {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'EPERM');
+  }
+}
+
 async function withLedgerLock<T>(fn: () => Promise<T>): Promise<T> {
   const previous = ledgerLock;
   let release!: () => void;
@@ -174,8 +184,14 @@ export async function reserveAction(key: string, messageHash: string): Promise<{
   return withLedgerLock(async () => {
     const state = await readState();
     const previous = state[key];
-    if (previous && previous.messageHash === messageHash && (previous.status === 'reserved' || previous.status === 'sent' || previous.status === 'skipped')) {
+    if (previous && (previous.messageHash === messageHash || previous.messageHash === undefined) && (previous.status === 'sent' || previous.status === 'skipped')) {
       return { acquired: false, record: previous };
+    }
+    if (previous && previous.messageHash === messageHash && previous.status === 'reserved') {
+      const ownerPid = Number.parseInt((previous.attemptId ?? '').split('-', 1)[0] ?? '', 10);
+      if (await processExists(ownerPid)) {
+        return { acquired: false, record: previous };
+      }
     }
     const record: ActionRecord = { status: 'reserved', messageHash, attemptId: `${process.pid}-${Date.now()}`, updatedAt: new Date().toISOString() };
     state[key] = record;

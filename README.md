@@ -230,11 +230,13 @@ boss_login
 {
   "messages": [
     {
+      "candidateId": "123456789-0",
       "candidateName": "张三",
       "text": "您好，感谢您的关注，请问方便补充一下简历吗？",
       "exact": true
     },
     {
+      "candidateId": "987654321-0",
       "candidateName": "李四",
       "text": "您好，感谢您的关注，请问方便补充一下简历吗？",
       "exact": true
@@ -292,7 +294,8 @@ boss_login
 
 参数说明：
 
-- `candidateName`：候选人姓名，建议从 `boss_list_candidates` 的结果中获取。
+- `candidateId`：候选人会话稳定 ID，必须从最新的 `boss_list_candidates` 或 `chat-list` 结果获取；批量工具按此 ID 定位，不按姓名回退。
+- `candidateName`：候选人姓名，用于打开后的姓名校验和结果展示。
 - `text`：要发送的消息正文。
 - `exact`：是否精确匹配姓名，建议保持 `true`。
 - `confirm`：必须显式设置为 `true`，否则不会发送。

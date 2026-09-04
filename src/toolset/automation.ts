@@ -4,9 +4,10 @@ import { withBossSessionPage } from '../common/boss_session_page.js';
 import { isBossChatIndexUrl } from '../common/auth.js';
 import { assertRecommendPageReady, clickGreet, readRecommendList } from './recommend.js';
 import { runChatActionOnCurrentConversation } from './action.js';
-import { runSendChatMessageOnPage } from './send.js';
+import { runOpenAndSendMessageIdempotent } from './send.js';
 import { runOpenCandidateChatById } from './chat.js';
-import { matchCandidateProfile, messageFingerprint, parseCandidateProfile, recordAction, hasActionBeenRecorded, type CandidateRequirements, type CandidateProfile } from './candidate_profile.js';
+import { collectAllChatItems } from './list.js';
+import { matchCandidateProfile, messageFingerprint, parseCandidateProfile, recordAction, reserveAction, hasActionBeenRecorded, type CandidateRequirements, type CandidateProfile } from './candidate_profile.js';
 
 export type AutomationOptions = {
   scope: 'recommend' | 'chat' | 'chat-list';
@@ -17,65 +18,11 @@ export type AutomationOptions = {
   requestResume?: boolean;
   receiveResume?: boolean;
   batchSize?: number;
+  signal?: AbortSignal;
   onProgress?: (progress: { phase: string; total: number; processed: number; currentCandidate?: string; matched: number; failed: number }) => void;
 };
 
 type Result = { candidate: CandidateProfile; match: ReturnType<typeof matchCandidateProfile>; action: string };
-type ChatListEntry = { candidateId: string; name: string };
-
-async function collectAllChatEntries(page: Page): Promise<ChatListEntry[]> {
-  const entries = new Map<string, ChatListEntry>();
-  const unresolved = new Set<string>();
-  let stable = 0;
-  let last = '';
-  for (let i = 0; i < CHAT_LIST_SCROLL_MAX_ROUNDS; i += 1) {
-    const state = (await page.evaluate(`(() => {
-      const norm = (v) => (v ?? '').replace(/\\s+/g, ' ').trim();
-      const rows = Array.from(document.querySelectorAll('.geek-item-wrap'));
-      const visible = rows.map((wrap) => { const row = wrap.querySelector('.geek-item') || wrap; return { name: norm(wrap.querySelector('.geek-name')?.textContent), candidateId: row.getAttribute('data-id') || row.id.replace(/^_/, '') }; }).filter((x) => x.name);
-      const root = document.querySelector('.user-list');
-      if (!(root instanceof HTMLElement) || root.scrollHeight <= root.clientHeight) return { visible, moved: false, atEnd: true, top: 0, height: 0 };
-      const before = root.scrollTop;
-      root.scrollTop = Math.min(before + Math.max(180, Math.floor(root.clientHeight * 0.82)), root.scrollHeight);
-      return { visible, moved: root.scrollTop !== before, atEnd: root.scrollTop + root.clientHeight >= root.scrollHeight - 2, top: root.scrollTop, height: root.scrollHeight };
-    })()`)) as { visible: ChatListEntry[]; moved: boolean; atEnd: boolean; top: number; height: number };
-    const before = entries.size;
-    for (const entry of state.visible) {
-      if (entry.candidateId) entries.set(entry.candidateId, entry);
-      else unresolved.add(entry.name);
-    }
-    const signature = `${entries.size}:${state.top}:${state.height}:${state.atEnd}`;
-    stable = entries.size === before && signature === last ? stable + 1 : 0;
-    last = signature;
-    if (state.atEnd && stable >= 2) break;
-    if (!state.moved && state.atEnd) break;
-    await sleepRandom(CHAT_LIST_SCROLL_WAIT_MS.min, CHAT_LIST_SCROLL_WAIT_MS.max);
-  }
-  if (entries.size === 0) throw new Error('会话列表为空，未读取到带稳定 ID 的候选人。');
-  if (unresolved.size > 0) throw new Error(`有 ${unresolved.size} 条会话未找到稳定 candidateId，已拒绝按姓名降级处理。`);
-  return [...entries.values()];
-}
-
-const CHAT_LIST_SCROLL_MAX_ROUNDS = 80;
-const CHAT_LIST_SCROLL_WAIT_MS = { min: 450, max: 850 } as const;
-
-async function resetChatListScroll(page: Page): Promise<void> {
-  await page.evaluate(`(() => {
-    const row = document.querySelector('.geek-item-wrap');
-    let node = document.querySelector('.user-list') || row?.parentElement || null;
-    while (node) {
-      const style = window.getComputedStyle(node);
-      if ((style.overflowY === 'auto' || style.overflowY === 'scroll' || style.overflowY === 'hidden') && node.scrollHeight > node.clientHeight) {
-        node.scrollTop = 0;
-        return;
-      }
-      node = node.parentElement;
-    }
-    (document.scrollingElement || document.documentElement).scrollTop = 0;
-  })()`);
-  await sleepRandom(220, 420);
-}
-
 async function recommendProfiles(frame: Frame): Promise<CandidateProfile[]> {
   const rows = await frame.evaluate(`(() => {
     const norm = (v) => (v ?? '').replace(/\\s+/g, ' ').trim();
@@ -124,24 +71,38 @@ export async function runCandidateAutomation(options: AutomationOptions): Promis
         const match = matchCandidateProfile(profile, req);
         let action = match.matched ? '符合条件' : '不符合条件';
         if (execute && match.matched) {
-          await clickGreet(frame, profile.name);
-          action = '已打招呼';
-          await recordAction(`greet:${profile.geekId || profile.name}`, 'sent');
+          if (!profile.geekId) throw new Error(`候选人「${profile.name}」缺少稳定 geekId，拒绝执行打招呼。`);
+          const actionKey = `greet:${profile.geekId}`;
+          const reservation = await reserveAction(actionKey, 'greet');
+          if (!reservation.acquired) {
+            action = '已打过招呼，跳过';
+          } else {
+            try {
+              await clickGreet(frame, profile.name);
+              action = '已打招呼';
+              await recordAction(actionKey, 'sent', 'greet');
+            } catch (error) {
+              await recordAction(actionKey, 'failed', 'greet', error instanceof Error ? error.message : String(error));
+              throw error;
+            }
+          }
         }
         results.push({ candidate: profile, match, action });
       }
     } else {
       if (!isBossChatIndexUrl(page.url())) throw new Error('当前不在沟通列表页。');
-      const entries = options.scope === 'chat-list' ? await collectAllChatEntries(page) : [];
-      if (options.scope === 'chat-list') await resetChatListScroll(page);
+      const entries = options.scope === 'chat-list' ? await collectAllChatItems(page) : [];
       const targets = options.scope === 'chat-list' ? entries : [{ candidateId: '', name: '' }];
       let matchedCount = 0;
       let failedCount = 0;
       options.onProgress?.({ phase: 'collected', total: targets.length, processed: 0, matched: 0, failed: 0 });
       for (let i = 0; i < targets.length; i += 1) {
         const target = targets[i]!;
+        let reservedActionKey: string | undefined;
+        let reservedMessageHash: string | undefined;
         try {
-          if (target.candidateId) await runOpenCandidateChatById(page, target.candidateId, target.name);
+          if (options.signal?.aborted) throw options.signal.reason instanceof Error ? options.signal.reason : new Error('任务已取消。');
+          if (target.candidateId) await runOpenCandidateChatById(page, target.candidateId, target.name, options.signal);
           const profile = await chatProfile(page, target.candidateId || undefined);
           const match = matchCandidateProfile(profile, req);
           let action = match.matched ? '符合条件' : '不符合条件';
@@ -150,16 +111,24 @@ export async function runCandidateAutomation(options: AutomationOptions): Promis
           const key = `message:${profile.geekId || target.candidateId || profile.name}`;
           const hash = messageFingerprint(message);
           if (match.matched) {
-            if (await hasActionBeenRecorded(key, hash)) action = '已发送过，跳过';
+            reservedActionKey = key;
+            reservedMessageHash = hash;
+            const reservation = await reserveAction(key, hash);
+            if (!reservation.acquired || await hasActionBeenRecorded(key, hash)) action = '已发送过，跳过';
             else {
               const sent = await page.evaluate(`((expected) => Array.from(document.querySelectorAll('.item-myself .text span')).some((el) => (el.textContent || '').replace(/\\s+/g, ' ').trim() === expected))`, message);
               if (sent) { action = '聊天记录已有相同消息，跳过'; await recordAction(key, 'skipped', hash); }
               else {
-                await runSendChatMessageOnPage(page, { text: message });
-                if (options.requestResume) await runChatActionOnCurrentConversation(page, { action: 'request-attachment-resume' });
-                if (options.receiveResume) await runChatActionOnCurrentConversation(page, { action: 'agree-resume' });
-                await recordAction(key, 'sent', hash);
-                action = options.requestResume && options.receiveResume ? '已回复、求简历并接收简历' : options.requestResume ? '已回复并求简历' : options.receiveResume ? '已回复并接收简历' : '已回复';
+                const sendResult = await runOpenAndSendMessageIdempotent(page, { text: message, signal: options.signal });
+                if (sendResult.status === 'skipped') {
+                  action = '聊天记录已有相同消息，跳过';
+                  await recordAction(key, 'skipped', hash);
+                } else {
+                  if (options.requestResume) await runChatActionOnCurrentConversation(page, { action: 'request-attachment-resume' });
+                  if (options.receiveResume) await runChatActionOnCurrentConversation(page, { action: 'agree-resume' });
+                  await recordAction(key, 'sent', hash);
+                  action = options.requestResume && options.receiveResume ? '已回复、求简历并接收简历' : options.requestResume ? '已回复并求简历' : options.receiveResume ? '已回复并接收简历' : '已回复';
+                }
               }
             }
           } else {
@@ -169,6 +138,9 @@ export async function runCandidateAutomation(options: AutomationOptions): Promis
           }
           results.push({ candidate: profile, match, action });
         } catch (error) {
+          if (reservedActionKey && reservedMessageHash) {
+            await recordAction(reservedActionKey, 'failed', reservedMessageHash, error instanceof Error ? error.message : String(error));
+          }
           failedCount += 1;
           const candidate = parseCandidateProfile({ name: target.name, rawText: target.name, geekId: target.candidateId });
           results.push({ candidate, match: { matched: false, reasons: [], unknown: ['读取失败'] }, action: `失败：${error instanceof Error ? error.message : String(error)}` });

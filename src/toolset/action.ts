@@ -439,14 +439,14 @@ async function runIncomingResumeCardAction(page: Page, which: IncomingCardBtn): 
     function norm(v) {
       return (v ?? "").replace(/\\s+/g, " ").trim();
     }
-    function isDisabledBtn(el: Element) {
+    function isDisabledBtn(el) {
       const cls = el.className ?? "";
       if (/disabled|forbid|ban/i.test(cls)) return true;
       if (el.getAttribute("disabled") !== null) return true;
       const st = window.getComputedStyle(el);
       return st.pointerEvents === "none" || Number(st.opacity) < 0.35;
     }
-    function matchesLabel(t: string, mode: string) {
+    function matchesLabel(t, mode) {
       if (mode === "agree") {
         return t === "同意" || t.indexOf("同意") === 0;
       }
@@ -466,8 +466,8 @@ async function runIncomingResumeCardAction(page: Page, which: IncomingCardBtn): 
         if (isDisabledBtn(btn)) {
           return { kind: "already_handled", which };
         }
-        (btn as HTMLElement).scrollIntoView({ block: "center", inline: "nearest" });
-        (btn as HTMLElement).click();
+        btn.scrollIntoView({ block: "center", inline: "nearest" });
+        btn.click();
         return { kind: "clicked", which };
       }
     }

@@ -1,4 +1,4 @@
-import { open, readFile, rm } from 'node:fs/promises';
+import { open, readFile, rm, stat } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { sleepRandom } from '../browser/timing.js';
@@ -67,7 +67,16 @@ async function processExists(pid: number): Promise<boolean> {
 async function clearStaleSessionLockIfNeeded(): Promise<void> {
   const meta = await readSessionLockMeta();
   if (!meta) {
-    await rm(SESSION_LOCK_FILE, { force: true }).catch(() => {});
+    // 锁文件可能正处于创建/写入 metadata 的短暂窗口；无法解析时不能删除，
+    // 否则会把仍在使用页面的有效锁误判为 stale，导致多个进程并发操作 Chrome。
+    try {
+      const info = await stat(SESSION_LOCK_FILE);
+      if (Date.now() - info.mtimeMs > SESSION_LOCK_WAIT_MAX_MS) {
+        await rm(SESSION_LOCK_FILE, { force: true });
+      }
+    } catch {
+      // 文件在检查期间被持有者清理，继续等待下一轮即可。
+    }
     return;
   }
   if (meta.hostname !== hostname()) {

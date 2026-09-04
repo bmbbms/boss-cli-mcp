@@ -128,6 +128,7 @@ function textResult(text: string) {
 }
 
 type BatchMessage = {
+  candidateId: string;
   candidateName: string;
   text: string;
   exact: boolean;
@@ -146,6 +147,7 @@ type BatchTask = {
   completedAt?: string;
   cancelRequested?: boolean;
   results: Array<{
+    candidateId: string;
     candidateName: string;
     status: 'sent' | 'skipped' | 'failed';
     message?: string;
@@ -201,18 +203,20 @@ function normalizeBatchMessages(messages: BatchMessage[]): BatchMessage[] {
     throw new Error(`单次最多发送 ${MAX_BATCH_SIZE} 人。`);
   }
   const normalized = messages.map((item) => ({
+    candidateId: item.candidateId.trim(),
     candidateName: item.candidateName.trim(),
     text: item.text.trim(),
     exact: item.exact !== false,
   }));
   const seen = new Set<string>();
   for (const item of normalized) {
+    if (!item.candidateId) throw new Error(`候选人「${item.candidateName || '未知'}」缺少稳定 candidateId，请先从最新列表获取。`);
     if (!item.candidateName) throw new Error('候选人姓名不能为空。');
     if (!item.text) throw new Error(`候选人「${item.candidateName}」的消息不能为空。`);
     if (item.text.length > MAX_MESSAGE_LENGTH) {
       throw new Error(`候选人「${item.candidateName}」的消息超过 ${MAX_MESSAGE_LENGTH} 个字符。`);
     }
-    const key = item.candidateName.toLocaleLowerCase();
+    const key = item.candidateId;
     if (seen.has(key)) throw new Error(`批量列表中存在重复候选人：${item.candidateName}`);
     seen.add(key);
   }
@@ -282,9 +286,9 @@ function startCandidateAutomationTask(options: Parameters<typeof runCandidateAut
   taskControllers.set(taskId, controller);
   activeBrowserTaskId = taskId;
   const timeout = setTimeout(() => { task.cancelRequested = true; controller.abort(new Error(`异步任务超过 ${TASK_TIMEOUT_MS / 1000}s，已请求停止。`)); }, TASK_TIMEOUT_MS);
-  void runCandidateAutomation({ ...options, onProgress: (p) => { task.progress = p; } })
-    .then((result) => { task.status = task.cancelRequested ? 'cancelled' : 'completed'; task.result = result; task.completedAt = nowIso(); })
-    .catch((error) => { task.status = task.cancelRequested ? 'cancelled' : 'failed'; task.error = error instanceof Error ? error.message : String(error); task.completedAt = nowIso(); })
+  void runCandidateAutomation({ ...options, signal: controller.signal, onProgress: (p) => { task.progress = p; } })
+    .then((result) => { task.status = task.cancelRequested ? 'cancelled' : 'completed'; task.result = result; task.completedAt = nowIso(); mcpLog('INFO', 'task_finished', { taskId, operation: 'candidate_automation', status: task.status }); })
+    .catch((error) => { task.status = task.cancelRequested ? 'cancelled' : 'failed'; task.error = error instanceof Error ? error.message : String(error); task.completedAt = nowIso(); mcpLog('ERROR', 'task_finished', { taskId, operation: 'candidate_automation', status: task.status, error: task.error }); })
     .finally(() => { clearTimeout(timeout); taskControllers.delete(taskId); if (activeBrowserTaskId === taskId) activeBrowserTaskId = null; });
   return JSON.stringify({ taskId, operation: 'candidate_automation', status: 'running', message: '会话列表分析已异步启动，请使用 boss_async_task_status 查询进度。' }, null, 2);
 }
@@ -300,6 +304,7 @@ async function runBatchSendMessages(
   }
 
   const results: Array<{
+    candidateId: string;
     candidateName: string;
     status: 'sent' | 'skipped' | 'failed';
     message?: string;
@@ -312,10 +317,10 @@ async function runBatchSendMessages(
     }
     if (task) task.currentCandidate = item.candidateName;
     const messageHash = messageFingerprint(item.text);
-    const actionKey = `message:${item.candidateName}:${messageHash}`;
+    const actionKey = `message:${item.candidateId}:${messageHash}`;
     const reservation = await reserveAction(actionKey, messageHash);
     if (!reservation.acquired) {
-      results.push({ candidateName: item.candidateName, status: 'skipped', message: '已存在持久化发送记录，跳过重复发送。' });
+      results.push({ candidateId: item.candidateId, candidateName: item.candidateName, status: 'skipped', message: '已存在持久化发送记录，跳过重复发送。' });
       if (task) {
         task.processed = results.length;
         task.sent = results.filter((entry) => entry.status === 'sent').length;
@@ -327,6 +332,7 @@ async function runBatchSendMessages(
     }
     try {
       const result = await implOpenAndSendMessage({
+        candidateId: item.candidateId,
         candidateName: item.candidateName,
         text: item.text,
         exact: item.exact,
@@ -334,10 +340,11 @@ async function runBatchSendMessages(
       });
       const skipped = result.includes('跳过发送');
       await recordAction(actionKey, skipped ? 'skipped' : 'sent', messageHash);
-      results.push({ candidateName: item.candidateName, status: skipped ? 'skipped' : 'sent', message: result });
+      results.push({ candidateId: item.candidateId, candidateName: item.candidateName, status: skipped ? 'skipped' : 'sent', message: result });
     } catch (error) {
       await recordAction(actionKey, 'failed', messageHash, error instanceof Error ? error.message : String(error));
       results.push({
+        candidateId: item.candidateId,
         candidateName: item.candidateName,
         status: 'failed',
         error: error instanceof Error ? error.message : String(error),
@@ -594,11 +601,12 @@ server.registerTool(
   'boss_batch_send_messages',
   {
     description:
-      '按候选人姓名逐个打开聊天并发送消息。工具会串行执行，最多 20 人；必须显式确认真实发送。',
+      '按稳定 candidateId 逐个打开聊天并发送消息。candidateName 用于姓名校验和结果展示；工具会串行执行，最多 20 人；必须显式确认真实发送。',
     inputSchema: {
       messages: z
         .array(
           z.object({
+            candidateId: z.string().min(1).describe('候选人会话稳定 ID，必须来自最新列表结果'),
             candidateName: z.string().min(1).describe('候选人姓名；建议来自 boss_list_candidates 的结果'),
             text: z.string().min(1).describe('要发送的消息正文'),
             exact: z.boolean().optional().default(true).describe('是否精确匹配姓名，默认 true'),
@@ -805,6 +813,7 @@ server.registerTool(
       JSON.stringify(
         {
           ok: true,
+          ready: !!browser?.connected && !!page && !page.isClosed(),
           mcpVersion: MCP_VERSION,
           pid: process.pid,
           browserConnected: !!browser?.connected,

@@ -29,6 +29,7 @@ type SearchFormSnapshot = {
 };
 
 export type DeepSearchGeekItem = {
+  geekId: string;
   name: string;
   meta: string;
   work: string;
@@ -1458,7 +1459,8 @@ export async function readDeepSearchGeekList(page: Page): Promise<DeepSearchGeek
         if (recEl) {
           reason = norm(recEl.textContent).replace(/^推荐理由\\s*/, "").trim();
         }
-        return { name, meta, work, edu, reason };
+        const geekId = item.getAttribute('data-geekid') || item.getAttribute('data-geek') || '';
+        return { geekId, name, meta, work, edu, reason };
       })
       .filter((x) => x !== null);
   })()`)) as DeepSearchGeekItem[];
